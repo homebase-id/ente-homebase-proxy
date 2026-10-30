@@ -1,4 +1,4 @@
-# The Ente → Homebase proxy. Build from proxy/:
+# The Ente → Homebase proxy. Build from the repo root:
 #   docker build -t ente-homebase-proxy .
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

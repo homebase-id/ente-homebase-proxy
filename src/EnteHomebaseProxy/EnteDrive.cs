@@ -2,7 +2,8 @@ namespace EnteHomebaseProxy;
 
 /// <summary>
 /// Ente's zero-knowledge drive and its fixed files. The values are
-/// web/packages/homebase/constants.ts; keep them the same.
+/// contract/ente-homebase.json (the web app's constants.ts has the same;
+/// ContractTests checks both).
 /// </summary>
 public static class EnteDrive
 {

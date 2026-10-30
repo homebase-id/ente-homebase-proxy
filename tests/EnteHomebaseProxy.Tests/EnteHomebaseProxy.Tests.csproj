@@ -9,8 +9,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- The TypeScript client's test vectors, so both ports agree byte for byte. -->
-    <Content Include="..\..\..\web\packages\homebase\vectors.json" Link="vectors.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The contract with the Ente web app, and its client's test vectors (CONTRACT.md). -->
+    <Content Include="..\..\contract\vectors.json" Link="vectors.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\contract\ente-homebase.json" Link="ente-homebase.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

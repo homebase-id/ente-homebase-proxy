@@ -1,9 +1,12 @@
 # Ente → Homebase proxy: status
 
+Moved out of the Ente fork (homebase-id/homebase-ente, `proxy/` on branch `proxy-v1`) into
+this repo on 2026-10-30, with its history. What it shares with the web app is in CONTRACT.md.
+
 ## Live tests
 
 Ente's own test credentials were made on 2026-10-30 (Todd approved "Ente proxy tests" on
-frodo). They're in `proxy/.credentials.json` (gitignored, mode 600). Run everything with:
+frodo). They're in `.credentials.json` (gitignored, mode 600). Run everything with:
 
 ```sh
 HOMEBASE_CREDENTIALS=$PWD/.credentials.json ~/.dotnet/dotnet test
@@ -12,7 +15,7 @@ HOMEBASE_CREDENTIALS=$PWD/.credentials.json ~/.dotnet/dotnet test
 The key endpoint test runs **only if Ente's drive has no key attributes file yet**, and deletes
 the one it made. Once the web app's key setup creates your real one, it skips. If Homebase
 refuses the credentials, the tests fail with "credentials revoked: redo consent": run
-`node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/consent.mjs` again and approve.
+`node scripts/consent.mjs` again and approve.
 
 ## Milestones
 
@@ -158,7 +161,7 @@ other identities (left as 501).
   auth middleware; 403 `{}` for key attributes already set, as museum; 501 in Ente's ApiError
   shape. Homebase failures other than 401/403 are 502 `HOMEBASE_ERROR`.
 - **Ente's drive**: the alias, fixed uniqueIds and file types are in `EnteDrive.cs` (the alias
-  and key attributes file copied from `web/packages/homebase/constants.ts`); IDs ↔ uniqueIds in
+  and key attributes file from `contract/ente-homebase.json`, see CONTRACT.md); IDs ↔ uniqueIds in
   `EnteIds.cs`. The password file is never touched.
 - **Middleware**: X-Request-Id (kept if it's a plain token, else new), request logging
   (method, path, status, duration), CORS (`ALLOWED_ORIGINS`, default http://localhost:3020).
@@ -168,9 +171,9 @@ other identities (left as 501).
 ## How to run
 
 ```sh
-cd proxy
+# in this repo
 ~/.dotnet/dotnet run --project src/EnteHomebaseProxy     # http://localhost:8095
-cd ../web && npm run dev:photos-homebase                 # the web app, http://localhost:3020
+(cd ../ente/web && npm run dev:photos-homebase)          # the web app (homebase-ente), :3020
 ~/.dotnet/dotnet test                                    # offline tests; live ones skip
 docker compose up --build                                # the same, in Docker
 ```

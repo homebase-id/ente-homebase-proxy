@@ -61,7 +61,7 @@ public sealed class LiveHomebase
         using var response = await http.SendAsync(request, ct);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
         {
-            Assert.Fail("credentials revoked: redo consent (node proxy/scripts/consent.mjs)");
+            Assert.Fail("credentials revoked: redo consent (node scripts/consent.mjs)");
         }
 
         Assert.True(response.IsSuccessStatusCode, $"auth/context: HTTP {(int)response.StatusCode}");

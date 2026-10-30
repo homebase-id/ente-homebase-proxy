@@ -4,13 +4,13 @@
 // saves the credentials to ../.credentials.json (gitignored, mode 600).
 // Adapted from the Immich Homebase client's scripts/consent.mjs.
 //
-// Usage (from proxy/):
-//   node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/consent.mjs [identity]
+// Usage (from the repo root):
+//   node scripts/consent.mjs [identity]
 // Default identity: frodo.baggins.demo.rocks. Open the printed URL, log in as
 // the owner and approve Ente Photos.
 //
-// Ente's app registration and drive come from web/packages/homebase/constants.ts,
-// the same values the web app signs in with.
+// Ente's app registration and drive come from contract/ente-homebase.json, the
+// same values the web app signs in with (CONTRACT.md).
 //
 // Formats (odin-core): authorize params in YouAuthAuthorizeRequest.cs; the
 // exchange secret is HKDF-SHA256(ECDH X, 48 bytes zero-padded, salt), 16 bytes,
@@ -21,15 +21,20 @@
 // Prints no secret: only the identity, field names, lengths and the drive alias.
 
 import crypto from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
-import {
-    enteApp,
-    enteDrive,
-} from "../../web/packages/homebase/constants.ts";
+
+const contract = JSON.parse(
+    readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "..", "contract", "ente-homebase.json"),
+        "utf8",
+    ),
+);
+const enteDrive = contract.drive;
+const enteApp = { ...contract.app, drives: [contract.drive] };
 
 const IDENTITY = process.argv[2] ?? "frodo.baggins.demo.rocks";
 const PORT = 7778;

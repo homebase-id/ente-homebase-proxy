@@ -128,7 +128,7 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
     [Fact]
     public void EveryEnteRouteInTheGroupsIsMapped()
     {
-        var mainGo = FindUp("server/cmd/museum/main.go");
+        var mainGo = EnteCheckout.FileOrSkip("server/cmd/museum/main.go");
         var enteRoutes = Regex.Matches(File.ReadAllText(mainGo),
                 """(publicAPI|privateAPI|storageAPI|publicCollectionAPI)\.(GET|POST|PUT|PATCH|DELETE)\("(/[^"]*)""")
             .Select(m => (Method: m.Groups[2].Value,
@@ -165,16 +165,5 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
                 @"\{(\w+):\w+\}", "{$1}")))
             .GroupBy(r => r).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
         Assert.True(duplicates.Count == 0, "Mapped twice: " + string.Join(", ", duplicates));
-    }
-
-    private static string FindUp(string relative)
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            var candidate = Path.Combine(dir.FullName, relative);
-            if (File.Exists(candidate)) return candidate;
-        }
-
-        throw new FileNotFoundException(relative);
     }
 }
