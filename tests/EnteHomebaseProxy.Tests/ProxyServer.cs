@@ -9,11 +9,17 @@ namespace EnteHomebaseProxy.Tests;
 
 /// <summary>
 /// The real proxy on a free localhost port (real Kestrel, real HTTP), with
-/// every log line it writes captured for inspection.
+/// every log line it writes captured for inspection. Settings, if any, as
+/// command-line arguments ("--NAME=value").
 /// </summary>
-public sealed class ProxyServer : IAsyncLifetime
+public class ProxyServer : IAsyncLifetime
 {
+    private readonly string[] _settings;
     private WebApplication? _app;
+
+    public ProxyServer() : this([]) { }
+
+    protected ProxyServer(string[] settings) => _settings = settings;
 
     public ConcurrentQueue<string> Logs { get; } = new();
     public HttpClient Client { get; private set; } = null!;
@@ -21,7 +27,7 @@ public sealed class ProxyServer : IAsyncLifetime
 
     public async ValueTask InitializeAsync()
     {
-        _app = ProxyApp.Build(["--urls", "http://127.0.0.1:0"], builder =>
+        _app = ProxyApp.Build(["--urls", "http://127.0.0.1:0", .. _settings], builder =>
         {
             builder.Logging.ClearProviders();
             builder.Logging.SetMinimumLevel(LogLevel.Trace);
@@ -33,7 +39,7 @@ public sealed class ProxyServer : IAsyncLifetime
         Client = new HttpClient { BaseAddress = new Uri(address) };
     }
 
-    public async ValueTask DisposeAsync()
+    public virtual async ValueTask DisposeAsync()
     {
         Client.Dispose();
         if (_app is not null) await _app.DisposeAsync();
