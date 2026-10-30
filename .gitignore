@@ -2,3 +2,6 @@ bin/
 obj/
 # Homebase credentials from scripts/consent.mjs: secrets, never commit.
 .credentials*.json
+client/
+# The Ente checkout CI builds the web app from.
+ente/

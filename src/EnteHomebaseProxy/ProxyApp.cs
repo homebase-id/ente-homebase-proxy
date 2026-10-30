@@ -2,18 +2,25 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using EnteHomebaseProxy.Handlers;
 using EnteHomebaseProxy.Odin;
+using Microsoft.AspNetCore.HttpOverrides;
 
 namespace EnteHomebaseProxy;
 
 /// <summary>
 /// The proxy: Ente's REST API in front of the caller's own Homebase. Stateless:
 /// each request carries its credentials (X-Auth-Token) and makes at most one
-/// call to Odin. Middleware is only request IDs, request logging and CORS.
+/// call to Odin. Middleware is only request IDs, request logging and CORS,
+/// plus the web app (WebApp) when it's bundled. The API answers both at / and
+/// under /api, which is where the bundled web app calls it.
 /// </summary>
 public static partial class ProxyApp
 {
     public const string RequestIdHeader = "X-Request-Id";
     public const string DefaultUrls = "http://localhost:8095";
+    public static readonly PathString ApiPathBase = "/api";
+
+    /// <summary>Set behind a reverse proxy (Caddy) to trust its X-Forwarded-Proto and -For.</summary>
+    public const string TrustForwardedHeadersSetting = "TRUST_FORWARDED_HEADERS";
 
     /// <summary>The headers Ente's web app sends.</summary>
     public static readonly string[] AllowedHeaders =
@@ -45,8 +52,24 @@ public static partial class ProxyApp
         configure?.Invoke(builder);
         var app = builder.Build();
 
+        if (app.Configuration.GetValue<bool>(TrustForwardedHeadersSetting))
+        {
+            // The container is only reachable from the host's Caddy, which arrives
+            // from the Docker network rather than loopback.
+            var forwarded = new ForwardedHeadersOptions
+            {
+                ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedFor,
+            };
+            forwarded.KnownIPNetworks.Clear();
+            forwarded.KnownProxies.Clear();
+            app.UseForwardedHeaders(forwarded);
+        }
+
+        app.UsePathBase(ApiPathBase);
         app.Use(RequestIdAndLogging);
         app.UseCors();
+        app.UseRouting();
+        WebApp.Use(app);
 
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
         AuthHandlers.Map(app);
@@ -71,6 +94,7 @@ public static partial class ProxyApp
         context.Response.Headers[RequestIdHeader] = requestId;
 
         var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("EnteHomebaseProxy");
+        var path = (context.Request.PathBase + context.Request.Path).Value; // before the web app rewrites it
         var started = Stopwatch.GetTimestamp();
         try
         {
@@ -79,7 +103,7 @@ public static partial class ProxyApp
         finally
         {
             logger.LogInformation("{RequestId} {Method} {Path} {Status} {Ms} ms", requestId,
-                context.Request.Method, context.Request.Path.Value, context.Response.StatusCode,
+                context.Request.Method, path, context.Response.StatusCode,
                 (int)Stopwatch.GetElapsedTime(started).TotalMilliseconds);
         }
     }

@@ -6,13 +6,13 @@ namespace EnteHomebaseProxy.Tests;
 
 public class CredentialsTests
 {
-    private static string Token(object value) =>
+    internal static string Token(object value) =>
         Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)))
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    private static readonly string Ss = Convert.ToBase64String(new byte[16]);
-    private static readonly string Dk = Convert.ToBase64String(Enumerable.Repeat((byte)7, 16).ToArray());
-    private static readonly string Tk = Convert.ToBase64String(Enumerable.Repeat((byte)1, 33).ToArray());
+    internal static readonly string Ss = Convert.ToBase64String(new byte[16]);
+    internal static readonly string Dk = Convert.ToBase64String(Enumerable.Repeat((byte)7, 16).ToArray());
+    internal static readonly string Tk = Convert.ToBase64String(Enumerable.Repeat((byte)1, 33).ToArray());
 
     [Fact]
     public void ParsesAGoodToken()

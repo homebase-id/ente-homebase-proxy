@@ -85,7 +85,7 @@ public static class FilesHandlers
     private static JsonObject UploadUrl(HttpContext context) => new()
     {
         ["objectKey"] = EnteIds.NewId().ToString(),
-        ["url"] = $"{context.Request.Scheme}://{context.Request.Host}{ObjectsPath}/",
+        ["url"] = $"{context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{ObjectsPath}/",
     };
 
     /// <summary>GET /files/upload-urls?count: where to PUT objects. No Odin call (decision 5).</summary>
