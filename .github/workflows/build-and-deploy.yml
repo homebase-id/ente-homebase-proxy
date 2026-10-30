@@ -21,8 +21,7 @@ on:
 #
 # The one addition: the Ente Photos web app, from homebase-id/homebase-ente at the commit in
 # ente.ref, is built here and copied into the image (scripts/build-web.sh). homebase-ente is
-# private, so reading it needs ENTE_REPO_TOKEN: a fine-grained token with read-only Contents on
-# that one repository.
+# public (Ente is AGPL), so checking it out needs no token.
 #
 
 env:
@@ -63,7 +62,6 @@ jobs:
         with:
           repository: homebase-id/homebase-ente
           ref: ${{ steps.ente.outputs.ref }}
-          token: ${{ secrets.ENTE_REPO_TOKEN }}
           path: ente
           persist-credentials: false
 
