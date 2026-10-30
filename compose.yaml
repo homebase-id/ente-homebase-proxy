@@ -1,0 +1,11 @@
+# The proxy only. Odin Core is remote: each request's X-Auth-Token names the
+# identity (https://<identity>), so there's no Odin service here.
+services:
+  ente-homebase-proxy:
+    build: .
+    ports:
+      - "8095:8095"
+    environment:
+      # Origins of the Ente web app allowed by CORS, comma-separated.
+      ALLOWED_ORIGINS: http://localhost:3020
+    restart: unless-stopped
