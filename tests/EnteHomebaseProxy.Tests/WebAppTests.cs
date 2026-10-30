@@ -86,18 +86,32 @@ public class WebAppTests(WebAppServer proxy) : IClassFixture<WebAppServer>
         Assert.Equal(HttpStatusCode.Unauthorized, noToken.StatusCode);
     }
 
-    [Fact]
-    public async Task UploadUrlsPointUnderApi()
+    /// <summary>The one-request upload is under /api, and refuses parts out of order before calling Odin.</summary>
+    [Theory]
+    [InlineData("thumbnail", "request", "file")]
+    [InlineData("request", "file", "thumbnail")]
+    [InlineData("request", "thumbnail")]
+    public async Task TheUploadNeedsRequestThenThumbnailThenFile(params string[] parts)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/files/upload-urls?count=1");
+        var form = new MultipartFormDataContent();
+        foreach (var part in parts)
+        {
+            form.Add(part == "request"
+                ? new StringContent("""{"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n","metadata":{},"file":{"decryptionHeader":"h"},"thumbnail":{"decryptionHeader":"h"}}""")
+                : new ByteArrayContent([1, 2, 3]), part, part);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api{Handlers.FilesHandlers.UploadPath}")
+        {
+            Content = form,
+        };
         request.Headers.Add("X-Auth-Token", CredentialsTests.Token(new
         {
             v = 1, identity = "frodo.example.test", token = CredentialsTests.Tk, ss = CredentialsTests.Ss,
             dk = CredentialsTests.Dk,
         }));
         var response = await proxy.Client.SendAsync(request, TestContext.Current.CancellationToken);
-        var body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
 
-        Assert.Contains($"{proxy.Client.BaseAddress}api{Handlers.FilesHandlers.ObjectsPath}/", body);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 }

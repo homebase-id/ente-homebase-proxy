@@ -21,6 +21,17 @@ public static class OdinCrypto
         return aes.EncryptCbc(plain, iv, PaddingMode.PKCS7);
     }
 
+    /// <summary>AES-128-CBC with PKCS7, encrypting <paramref name="plain"/> as it's read (it's left open).</summary>
+    public static Stream AesCbcEncryptingStream(byte[] key, byte[] iv, Stream plain)
+    {
+        var aes = Aes.Create();
+        aes.Key = key;
+        aes.IV = iv;
+        aes.Mode = CipherMode.CBC;
+        aes.Padding = PaddingMode.PKCS7;
+        return new CryptoStream(plain, aes.CreateEncryptor(), CryptoStreamMode.Read, leaveOpen: true);
+    }
+
     public static byte[] AesCbcDecrypt(byte[] key, byte[] iv, byte[] cipher)
     {
         using var aes = Aes.Create();
@@ -73,11 +84,10 @@ public static class OdinCrypto
     /// The file key of an uploaded object, derived from the drive key and the
     /// object's uniqueId: HKDF-SHA256(drive key, salt = uniqueId, info =
     /// "ente-homebase-object"), 32 bytes = AES key ‖ IV. The IV is also the
-    /// payload's IV. The proxy can then read an object's payload without first
-    /// reading its header (Odin doesn't send a zkDrive file's key header with
-    /// the payload). Objects are written once and never changed, so each key
-    /// encrypts one payload. The key is still locked in the file's key header,
-    /// so other Homebase clients read the file as usual.
+    /// payload's IV. The proxy can then read a photo's payload or thumbnail
+    /// without first reading its header (Odin doesn't send a zkDrive file's key
+    /// header with the payload). The key is still locked in the file's key
+    /// header, so other Homebase clients read the file as usual.
     /// </summary>
     public static FileKey DeriveObjectKey(byte[] driveKey, Guid uniqueId)
     {

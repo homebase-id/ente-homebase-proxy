@@ -16,17 +16,33 @@ public sealed record OdinResponse(int Status, string? ErrorCode, JsonNode? Body)
         Status == 400 && ErrorCode is "existingFileWithUniqueId" or "4105";
 }
 
+/// <summary>
+/// A thumbnail of a payload, Homebase's way (odin-js buildManifest/buildFormData):
+/// sent with the payload, keyed by payload key + width, encrypted with the
+/// file key and the payload's IV.
+/// </summary>
+public sealed record OdinThumbnail(byte[] Bytes, int PixelWidth, int PixelHeight, string ContentType)
+{
+    public string Key(string payloadKey) => payloadKey + PixelWidth;
+}
+
+/// <summary>One payload: its bytes (read once, encrypted on the way to Odin) and its thumbnails.</summary>
+public sealed record OdinPayload(string Key, Stream Bytes, string ContentType)
+{
+    public IReadOnlyList<OdinThumbnail> Thumbnails { get; init; } = [];
+}
+
 /// <summary>A new zkDrive file: its appData, encrypted content, and at most one payload.</summary>
 public sealed record NewOdinFile(Guid UniqueId, int FileType, string? Content)
 {
     public Guid? GroupId { get; init; }
     public IReadOnlyList<Guid>? Tags { get; init; }
 
-    /// <summary>The file key; a fresh random one unless the caller needs to know it (objects).</summary>
+    /// <summary>The file key; a fresh random one unless the caller needs to know it (photos).</summary>
     public OdinCrypto.FileKey? FileKey { get; init; }
 
     /// <summary>One payload, encrypted with the file key and its IV (bytes as given: Ente's ciphertext).</summary>
-    public (string Key, byte[] Bytes)? Payload { get; init; }
+    public OdinPayload? Payload { get; init; }
 }
 
 /// <summary>
@@ -90,11 +106,17 @@ public sealed class OdinClient(HttpClient http)
             payloadDescriptors.Add(new JsonObject
             {
                 ["payloadKey"] = p.Key,
-                ["contentType"] = "application/octet-stream",
+                ["contentType"] = p.ContentType,
                 ["iv"] = Convert.ToBase64String(fileKey.Iv),
                 ["descriptorContent"] = null,
                 ["previewThumbnail"] = null,
-                ["thumbnails"] = new JsonArray(),
+                ["thumbnails"] = new JsonArray([.. p.Thumbnails.Select(t => new JsonObject
+                {
+                    ["thumbnailKey"] = t.Key(p.Key),
+                    ["pixelWidth"] = t.PixelWidth,
+                    ["pixelHeight"] = t.PixelHeight,
+                    ["contentType"] = t.ContentType,
+                })]),
             });
         }
 
@@ -143,9 +165,18 @@ public sealed class OdinClient(HttpClient http)
         };
         if (file.Payload is { } payload)
         {
-            form.Add(new ByteArrayContent(OdinCrypto.AesCbcEncrypt(fileKey.AesKey, fileKey.Iv, payload.Bytes))
+            foreach (var thumbnail in payload.Thumbnails)
             {
-                Headers = { ContentType = new("application/octet-stream") },
+                form.Add(new ByteArrayContent(OdinCrypto.AesCbcEncrypt(fileKey.AesKey, fileKey.Iv, thumbnail.Bytes))
+                {
+                    Headers = { ContentType = new(thumbnail.ContentType) },
+                }, "thumbnail", thumbnail.Key(payload.Key));
+            }
+
+            // Last, and streamed: an original can be a large video.
+            form.Add(new StreamContent(OdinCrypto.AesCbcEncryptingStream(fileKey.AesKey, fileKey.Iv, payload.Bytes))
+            {
+                Headers = { ContentType = new(payload.ContentType) },
             }, "payload", payload.Key);
         }
 
@@ -200,6 +231,23 @@ public sealed class OdinClient(HttpClient http)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get,
             $"{FilesRoot(credentials, driveAlias)}/by-uid/{uniqueId:D}/payload/{payloadKey}");
+        request.Headers.Authorization = AuthenticationHeaderValue.Parse(credentials.BearerToken);
+        using var response = await http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode) return ((int)response.StatusCode, null);
+        return ((int)response.StatusCode, await response.Content.ReadAsByteArrayAsync(ct));
+    }
+
+    /// <summary>
+    /// GET /api/v2/drives/{alias}/files/by-uid/{uid}/payload/{key}/thumb: the
+    /// thumbnail of exactly this size (directMatchOnly), as Odin stores it
+    /// (encrypted with the file key and the payload's IV).
+    /// </summary>
+    public async Task<(int Status, byte[]? Bytes)> GetThumbnailByUniqueIdAsync(HomebaseCredentials credentials,
+        string driveAlias, Guid uniqueId, string payloadKey, int width, int height, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            $"{FilesRoot(credentials, driveAlias)}/by-uid/{uniqueId:D}/payload/{payloadKey}/thumb" +
+            $"?width={width}&height={height}&directMatchOnly=true");
         request.Headers.Authorization = AuthenticationHeaderValue.Parse(credentials.BearerToken);
         using var response = await http.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode) return ((int)response.StatusCode, null);
