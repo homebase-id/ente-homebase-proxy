@@ -50,17 +50,55 @@ which single Odin call it would be, or why it can't be one. The reasons, by coun
 Others are one Odin call short or over: e.g. `PUT /users/recovery-key` and `/users/srp/update`
 would PATCH the key attributes file, which needs its versionTag from a read first (two calls).
 
-## Decisions for Todd
+## Decisions (2026-10-30, with Todd)
 
-1. **IDs.** Nearly every file and collection route needs Ente's int64 IDs mapped to Odin's
-   GUIDs. Options: a lookup table (state: breaks the rules), or a deterministic scheme (e.g.
-   the uniqueId is derived from the int64, and the client keeps the int64 in the encrypted
-   record). This is the next design decision.
-2. **Uploads and downloads.** Ente clients use presigned S3 URLs. The proxy can't offer those;
-   the client would have to send bytes through the proxy, which is a change to Ente's client.
-3. **Two-call routes.** A few routes need a read before a write (versionTag). Allow two calls
-   for those, or leave them 501?
-4. **`POST /users/logout`** has nothing to do on Homebase. Answer 200 without an Odin call?
+Not built yet; these shape the next work.
+
+1. **Ente IDs ↔ Odin uniqueIds, no state.** Every Ente ID maps to a GUID: one type byte,
+   zeros, then the number. Membership records also carry the album ID:
+
+   | Type byte | What | GUID |
+   |---|---|---|
+   | `01` | photo (file record) | `01` ‖ 7 zero bytes ‖ file ID (8 bytes) |
+   | `02` | album (collection) | `02` ‖ 7 zero bytes ‖ collection ID |
+   | `03` | album membership | `03` ‖ collection ID (7 bytes) ‖ file ID |
+   | `04` | uploaded object (bytes) | `04` ‖ 7 zero bytes ‖ object number |
+
+   The proxy picks new numbers: **milliseconds since 1970 × 2048 + random 0–2047**. They stay
+   below 2^53 (JavaScript's exact-integer limit) until about 2109, and they increase with
+   creation time, which Ente's web client relies on (album sort by creation time compares IDs,
+   `web/packages/new/photos/services/collection-summary.ts`). A collision makes Odin refuse
+   the create; nothing is overwritten. The number is read straight back out of the GUID when
+   listing. A soft-deleted Odin file loses its uniqueId, so the photo and album IDs also go
+   in tags.
+
+2. **Uploads and downloads (option A).** Ente's two-phase upload stays:
+   - `GET /files/upload-urls` returns proxy URLs; each `objectKey` is a new number.
+   - Each `PUT` stores the bytes as an object file (type `04`): one call.
+   - `POST /files` stores the photo record, using the **thumbnail's** object number as the
+     file ID: one call.
+   - Thumbnails download in one call; originals in two (read the record, then the object).
+   - Client change, Homebase mode only: send X-Auth-Token on the byte `PUT`s and downloads
+     (`web/packages/gallery/services/upload/remote.ts`, `web/packages/base/file-download.ts`),
+     and no multipart uploads (one `PUT` per file).
+
+3. **No credentials in URLs, ever.** The X-Auth-Token holds the drive key, which can't be
+   revoked. So no presigned-style URLs and no `?token=`: credentials only in the header.
+
+4. **Albums (option A): mirror Ente's model.** One Odin file per photo record (type `01`),
+   and one small file per album membership (type `03`): album X's copy of the photo's key,
+   tagged with the album and the photo.
+   - Album sync ("what changed since T"): 2 calls (memberships, then their photo records).
+   - Edit a photo: 1 call. Add to album: 1 call per photo.
+   - Remove from album: soft-delete the membership. Odin's tombstone keeps tags and groupId,
+     so sync can report the removal (checked: `DriveStorageServiceBase.WriteDeletedFileHeader`).
+
+5. **The call rule, changed.** Each handler makes **a fixed, small number of Odin calls (at
+   most 2)**, or **one per item** for batch requests. Still no state, caching, retries, or
+   lookups kept between requests. This replaces "exactly one Odin call per handler".
+
+Still open: whether `POST /users/logout` may answer 200 with no Odin call, and public links
+and sharing with other identities (left as 501 for now).
 
 ## Design
 
@@ -68,7 +106,8 @@ would PATCH the key attributes file, which needs its versionTag from a read firs
   `{"v":1,"identity","token","ss","dk"}`; the proxy decodes it, calls
   `https://<identity>/api/v2/...` with `Authorization: Bearer <token>`, and stores nothing.
   No caching, sessions, cookies, retries, queues, database or file writes.
-- **One Odin call per handler**, with Odin's encryption as part of it: shared-secret envelopes,
+- **One Odin call per handler** today (see decision 5 for the new rule), with Odin's
+  encryption as part of it: shared-secret envelopes,
   and zkDrive files (a fresh file key locked with the drive key). Ente's own encrypted data
   passes through untouched.
 - **Ente's shapes**: 401 `{"error":"missing token"}` / `{"error":"invalid token"}` as museum's
