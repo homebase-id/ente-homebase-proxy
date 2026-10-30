@@ -1,36 +1,26 @@
 # Ente → Homebase proxy: status
 
-## Todd: approve consent
+## Live tests
 
-The live tests need credentials for the **Ente Photos** app on Ente's drive. The browser's
-can't be exported (they're sealed under a non-extractable key), so make a file once:
-
-```sh
-cd proxy
-node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/consent.mjs
-```
-
-1. Open the URL it prints. Log in to frodo.baggins.demo.rocks as the owner.
-2. Approve **Ente Photos**, client **"Ente proxy tests"** (the "Ente Photos" drive, read and
-   write; the same app you approved for the web app).
-3. The script prints `drive key for 0ada68d6… opened (16 bytes)` and saves
-   `proxy/.credentials.json` (gitignored, mode 600).
-4. Then run the live tests:
+Ente's own test credentials were made on 2026-10-30 (Todd approved "Ente proxy tests" on
+frodo). They're in `proxy/.credentials.json` (gitignored, mode 600). Run everything with:
 
 ```sh
 HOMEBASE_CREDENTIALS=$PWD/.credentials.json ~/.dotnet/dotnet test
 ```
 
 The key endpoint test runs **only if Ente's drive has no key attributes file yet**, and deletes
-the one it made. Run it before the web app's key setup creates your real one, or it will skip.
+the one it made. Once the web app's key setup creates your real one, it skips. If Homebase
+refuses the credentials, the tests fail with "credentials revoked: redo consent": run
+`node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/consent.mjs` again and approve.
 
 ## What works
 
 | What | Checked by |
 |---|---|
-| `PUT /users/attributes`: stores the key attributes as one zkDrive file (fixed uniqueId), 403 if it exists, never overwrites | Live test, **not yet run** (needs the consent above) |
-| `GET /users/session-validity/v2`: `{hasSetKeys, keyAttributes}` from that file, as sent; `{hasSetKeys:false}` if none | Live test, **not yet run** |
-| Odin refusing the token → 401 `{"error":"invalid token"}` | Live test, **not yet run** |
+| `PUT /users/attributes`: stores the key attributes as one zkDrive file (fixed uniqueId), 403 if it exists, never overwrites | Live test against frodo, passing |
+| `GET /users/session-validity/v2`: `{hasSetKeys, keyAttributes}` from that file, as sent; `{hasSetKeys:false}` if none | Live test against frodo, passing |
+| Odin refusing the token → 401 `{"error":"invalid token"}` | Live test against frodo, passing |
 | Odin's encryption in C# (AES-CBC, key headers, envelopes) | Unit tests against the same vectors as the TypeScript and Node clients |
 | X-Auth-Token parsing; malformed → 401 `invalid token`, missing → 401 `missing token` | Unit and HTTP tests |
 | Every Ente route in the five groups is mapped (none 404s) and each TODO says why | Test that parses `server/cmd/museum/main.go` |
@@ -38,7 +28,8 @@ the one it made. Run it before the web app's key setup creates your real one, or
 | Logs hold no token, query string or body | HTTP test with a captured logger |
 | Docker image builds and runs (`/health` 200, a TODO route 501) | `docker build` and `docker run` |
 
-24 tests pass offline; 2 live tests skip until `HOMEBASE_CREDENTIALS` is set.
+26 tests pass with `HOMEBASE_CREDENTIALS` set (2 of them live against frodo, through the
+running proxy); without it, 24 pass and the 2 live ones skip.
 
 ## What's 501 and why
 
