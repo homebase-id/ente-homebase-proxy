@@ -14,27 +14,72 @@ the one it made. Once the web app's key setup creates your real one, it skips. I
 refuses the credentials, the tests fail with "credentials revoked: redo consent": run
 `node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/consent.mjs` again and approve.
 
+## Milestones
+
+**A. Sign in → empty gallery: works.** **B. Upload a photo and see it: works.** Both checked
+on 2026-10-30 in headless Chrome against frodo.baggins.demo.rocks, through this proxy and the
+web app (dev server on 3020):
+
+1. Sign in with Homebase → `/homebase` → **Continue to Ente Photos**. The web app points
+   Ente's API at the proxy, and Ente's keys are set up (first time) or unlocked with the
+   hidden password. Both paths ran: the first run created the real key attributes file.
+2. The gallery opens: user details, albums, album sync, trash, people/places key all answer;
+   no console errors.
+3. Upload a photo into Uncategorized (Ente creates that album through the proxy first): the
+   photo and thumbnail objects are PUT, then the record is created.
+4. **A fresh browser** (nothing cached) signs in and shows the photo: the album sync returns
+   it, the thumbnail comes from Homebase, and opening it downloads and decrypts the original.
+
+The test photo (a 320×240 checkerboard) is still in your Ente library on frodo.
+
 ## What works
 
-| What | Checked by |
-|---|---|
-| `PUT /users/attributes`: stores the key attributes as one zkDrive file (fixed uniqueId), 403 if it exists, never overwrites | Live test against frodo, passing |
-| `GET /users/session-validity/v2`: `{hasSetKeys, keyAttributes}` from that file, as sent; `{hasSetKeys:false}` if none | Live test against frodo, passing |
-| Odin refusing the token → 401 `{"error":"invalid token"}` | Live test against frodo, passing |
-| Odin's encryption in C# (AES-CBC, key headers, envelopes) | Unit tests against the same vectors as the TypeScript and Node clients |
-| X-Auth-Token parsing; malformed → 401 `invalid token`, missing → 401 `missing token` | Unit and HTTP tests |
-| Every Ente route in the five groups is mapped (none 404s) and each TODO says why | Test that parses `server/cmd/museum/main.go` |
-| `/health` 200 with no dependencies; X-Request-Id; CORS for http://localhost:3020 only | HTTP tests against the real server (Kestrel on a free port) |
-| Logs hold no token, query string or body | HTTP test with a captured logger |
-| Docker image builds and runs (`/health` 200, a TODO route 501) | `docker build` and `docker run` |
+| Route | Odin calls | Notes |
+|---|---|---|
+| `PUT /users/attributes`, `GET /users/session-validity/v2` | 1 | Key attributes file; 403 if set, never overwritten |
+| `GET /users/details/v2` | 0 | The identity as an Ente user; a 1 TiB "homebase" plan. TODO: real usage |
+| `POST /users/logout` | 0 | Nothing to do on Homebase |
+| `POST /collections`, `GET /collections/{id}` | 1 | An album: Ente's collection (client-encrypted) as content |
+| `GET /collections/v2` | 1 | Every album; each album's updationTime is *now* (see below) |
+| `GET /collections/v2/diff` | 2 | The album's memberships, then their photo records |
+| `GET /files/upload-urls`, `POST /files/upload-url` | 0 | URLs on the proxy (`/homebase/objects/{n}`); objectKey = a new number |
+| `PUT /homebase/objects/{n}` | 1 | The bytes as one payload, with a derived object key (below); up to 1 GiB |
+| `POST /files` | 2 | The photo record, then its membership; photo ID = the thumbnail's object number |
+| `GET /files/preview/{id}` | 1 | The thumbnail's bytes |
+| `GET /files/download/{id}` | 2 | The record (for the original's object), then the object |
+| `GET`/`POST /user-entity/key` | 1 | The key for one type of people/places data |
+| `/remote-store/feature-flags`, `/contacts/diff`, `/trash/v2/diff`, `/user-entity/entity/diff`, `/collection-actions/pending-remove` | 0 | Empty: nothing of that kind can exist yet |
 
-26 tests pass with `HOMEBASE_CREDENTIALS` set (2 of them live against frodo, through the
-running proxy); without it, 24 pass and the 2 live ones skip.
+Plus: Odin's encryption checked against the TypeScript and Node vectors; X-Auth-Token parsing;
+every Ente route in the five groups mapped and none mapped twice; `/health`; X-Request-Id; CORS
+(`Content-MD5` allowed for uploads); logs hold no token, query or body; Docker image.
+
+34 tests: 33 pass with `HOMEBASE_CREDENTIALS` set; the key endpoint test now skips, because
+the real key attributes file exists.
+
+## Worth knowing
+
+- **Album updationTime is always now.** Ente bumps an album when its photos change, and the
+  client only syncs an album whose time moved. Bumping on upload would be a third call, so
+  instead every pull syncs every album (each sync returns only changes). The sync looks 10
+  minutes back from sinceTime, since the client may store the proxy's clock while changes carry
+  Odin's; repeats are harmless.
+- **Object keys are derived** (`OdinCrypto.DeriveObjectKey`: HKDF of the drive key and the
+  object's uniqueId). Odin doesn't send a zero-knowledge file's key with its payload, so
+  otherwise every byte read would need its header first. Objects are written once; the key is
+  also locked in the file's key header, so other Homebase clients read them normally.
+- **No paging yet**: an album sync reads at most 1000 memberships, the album list 1000 albums.
+- **Security (prototype)**: the web app keeps the X-Auth-Token, which holds the drive key, where
+  Ente keeps its auth token (localStorage and IndexedDB, unencrypted).
+- **A failed `POST /files` leaves orphaned objects** (bytes with no record). One happened during
+  development; those two objects were deleted.
 
 ## What's 501 and why
 
-131 Ente routes are TODOs that return 501 `{"code":"NOT_IMPLEMENTED","message":<why>}`. Each says
-which single Odin call it would be, or why it can't be one. The reasons, by count:
+The other Ente routes are TODOs that return 501 `{"code":"NOT_IMPLEMENTED","message":<why>}`;
+each says which Odin calls it would be, or why not. With decisions 1–5 most file and album
+TODOs are now buildable (add to album, rename, trash, metadata edits). Remaining reasons, as
+first written (before the ID decision unblocked most of the "int64 IDs" ones):
 
 | Reason | Routes | What it means |
 |---|---|---|
@@ -52,7 +97,7 @@ would PATCH the key attributes file, which needs its versionTag from a read firs
 
 ## Decisions (2026-10-30, with Todd)
 
-Not built yet; these shape the next work.
+Built for milestones A and B (the routes above); the rest of the TODOs follow them.
 
 1. **Ente IDs ↔ Odin uniqueIds, no state.** Every Ente ID maps to a GUID: one type byte,
    zeros, then the number. Membership records also carry the album ID:
@@ -97,8 +142,8 @@ Not built yet; these shape the next work.
    most 2)**, or **one per item** for batch requests. Still no state, caching, retries, or
    lookups kept between requests. This replaces "exactly one Odin call per handler".
 
-Still open: whether `POST /users/logout` may answer 200 with no Odin call, and public links
-and sharing with other identities (left as 501 for now).
+Logout answers 200 with no Odin call (decided). Still open: public links and sharing with
+other identities (left as 501).
 
 ## Design
 
@@ -106,16 +151,15 @@ and sharing with other identities (left as 501 for now).
   `{"v":1,"identity","token","ss","dk"}`; the proxy decodes it, calls
   `https://<identity>/api/v2/...` with `Authorization: Bearer <token>`, and stores nothing.
   No caching, sessions, cookies, retries, queues, database or file writes.
-- **One Odin call per handler** today (see decision 5 for the new rule), with Odin's
-  encryption as part of it: shared-secret envelopes,
-  and zkDrive files (a fresh file key locked with the drive key). Ente's own encrypted data
-  passes through untouched.
+- **At most two Odin calls per handler** (decision 5), with Odin's encryption as part of
+  each: shared-secret envelopes, and zkDrive files (a file key locked with the drive key).
+  Ente's own encrypted data passes through untouched.
 - **Ente's shapes**: 401 `{"error":"missing token"}` / `{"error":"invalid token"}` as museum's
   auth middleware; 403 `{}` for key attributes already set, as museum; 501 in Ente's ApiError
   shape. Homebase failures other than 401/403 are 502 `HOMEBASE_ERROR`.
-- **Ente's drive**: alias and the key attributes file's uniqueId and fileType are in
-  `EnteDrive.cs`, copied from `web/packages/homebase/constants.ts`. The password file is never
-  touched.
+- **Ente's drive**: the alias, fixed uniqueIds and file types are in `EnteDrive.cs` (the alias
+  and key attributes file copied from `web/packages/homebase/constants.ts`); IDs ↔ uniqueIds in
+  `EnteIds.cs`. The password file is never touched.
 - **Middleware**: X-Request-Id (kept if it's a plain token, else new), request logging
   (method, path, status, duration), CORS (`ALLOWED_ORIGINS`, default http://localhost:3020).
   ASP.NET's and HttpClient's own request logs are turned down to Warning, since they include
@@ -126,6 +170,7 @@ and sharing with other identities (left as 501 for now).
 ```sh
 cd proxy
 ~/.dotnet/dotnet run --project src/EnteHomebaseProxy     # http://localhost:8095
+cd ../web && npm run dev:photos-homebase                 # the web app, http://localhost:3020
 ~/.dotnet/dotnet test                                    # offline tests; live ones skip
 docker compose up --build                                # the same, in Docker
 ```

@@ -17,8 +17,13 @@ public static class TrashHandlers
             "Trashes a collection, and optionally its files: one call per file. " + Why.IntIds);
         Todo.Map(app, "POST", "/collections/restore-files",
             "Restores trashed files into a collection: one PATCH per file. " + Why.IntIds);
-        Todo.Map(app, "GET", "/trash/v2/diff",
-            "Would be POST /api/v2/drives/{alias}/files/query-batch for trashed files. " + Why.Diff);
+        // Nothing can be trashed yet (the routes that trash are TODOs), so the
+        // trash is empty: no Odin call (decision 5). TODO: when trashing is
+        // built, this becomes a query for trashed memberships.
+        app.MapGet("/trash/v2/diff", (HttpContext context) =>
+            EnteResults.TryGetCredentials(context, out _, out var failure)
+                ? Results.Json(new { diff = Array.Empty<object>(), hasMore = false })
+                : failure!);
         Todo.Map(app, "POST", "/trash/delete",
             "Would be POST /api/v2/drives/{alias}/files/hard-delete-batch (one call for many files), but it " +
             "takes Odin file IDs and versionTags. " + Why.IntIds);

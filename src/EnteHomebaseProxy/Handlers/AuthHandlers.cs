@@ -14,6 +14,9 @@ public static class AuthHandlers
     {
         app.MapPut("/users/attributes", SetAttributes);
         app.MapGet("/users/session-validity/v2", GetSessionValidityV2);
+        app.MapGet("/users/details/v2", GetDetailsV2);
+        // Nothing to do on Homebase: the client forgets its credentials (decision 5: zero calls).
+        app.MapPost("/users/logout", () => Results.Ok());
 
         // Sign-in: YouAuth replaces all of these.
         Todo.Map(app, "POST", "/users/ott", Why.YouAuth);
@@ -51,15 +54,9 @@ public static class AuthHandlers
 
         // Account, sessions, billing.
         Todo.Map(app, "POST", "/users/event", "Client analytics events; there is nothing to send to Homebase.");
-        Todo.Map(app, "POST", "/users/logout",
-            "Nothing to do on Homebase: the client forgets its credentials. Answering 200 without an Odin " +
-            "call is a choice for Todd.");
         Todo.Map(app, "GET", "/users/payment-token", Why.Account);
         Todo.Map(app, "GET", "/users/families-token", Why.Account);
         Todo.Map(app, "GET", "/users/accounts-token", Why.Account);
-        Todo.Map(app, "GET", "/users/details/v2",
-            "Usage, plan and family details. Homebase storage usage might come from one Odin call, but the " +
-            "response also needs Ente's user ID and email, which a Homebase identity doesn't have. " + Why.IntIds);
         Todo.Map(app, "GET", "/users/deletion-summary", Why.Account);
         Todo.Map(app, "GET", "/users/locker-usage", Why.Account);
         Todo.Map(app, "POST", "/users/change-email", Why.Account);
@@ -70,6 +67,35 @@ public static class AuthHandlers
         Todo.Map(app, "GET", "/users/recover-account", Why.Account);
         Todo.Map(app, "POST", "/users/recover-account/validate", Why.Account);
         Todo.Map(app, "POST", "/users/recover-account", Why.Account);
+    }
+
+    /// <summary>A Homebase "plan" for Ente's UI: no Ente billing, so a large storage limit.</summary>
+    private const long HomebaseStorageLimit = 1L << 40; // 1 TiB
+
+    /// <summary>
+    /// GET /users/details/v2: the identity as an Ente user. No Odin call.
+    /// TODO: usage and fileCount are 0; Odin's drive storage usage would be one call.
+    /// </summary>
+    private static IResult GetDetailsV2(HttpContext context)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        var farFuture = DateTimeOffset.UtcNow.AddYears(100).ToUnixTimeMilliseconds() * 1000; // microseconds
+        return Results.Json(new
+        {
+            email = EnteIds.Email(credentials.Identity),
+            usage = 0,
+            fileCount = 0,
+            subscription = new
+            {
+                productID = "homebase",
+                storage = HomebaseStorageLimit,
+                expiryTime = farFuture,
+                paymentProvider = "homebase",
+                price = "0",
+                period = "year",
+            },
+            storageBonus = 0,
+        });
     }
 
     /// <summary>
@@ -100,8 +126,8 @@ public static class AuthHandlers
             return EnteResults.Status(400);
         }
 
-        var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias, EnteDrive.KeyAttributesUniqueId,
-            EnteDrive.KeyAttributesFileType, keyAttributes, tags: null, ct);
+        var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
+            new NewOdinFile(EnteDrive.KeyAttributesUniqueId, EnteDrive.KeyAttributesFileType, keyAttributes), ct);
         if (response.IsSuccess) return Results.Ok();
         if (response.IsExistingUniqueId) return EnteResults.Status(403);
         return EnteResults.OdinFailure(response);

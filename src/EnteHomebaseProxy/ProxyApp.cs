@@ -17,7 +17,7 @@ public static partial class ProxyApp
 
     /// <summary>The headers Ente's web app sends.</summary>
     public static readonly string[] AllowedHeaders =
-        ["X-Auth-Token", "X-Client-Package", "X-Client-Version", "Content-Type", RequestIdHeader];
+        ["X-Auth-Token", "X-Client-Package", "X-Client-Version", "Content-Type", "Content-MD5", RequestIdHeader];
 
     [GeneratedRegex("^[A-Za-z0-9._-]{1,64}$")]
     private static partial Regex RequestIdRegex();
@@ -54,6 +54,7 @@ public static partial class ProxyApp
         CollectionsHandlers.Map(app);
         SharingHandlers.Map(app);
         TrashHandlers.Map(app);
+        AppHandlers.Map(app);
 
         return app;
     }

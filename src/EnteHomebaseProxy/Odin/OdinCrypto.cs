@@ -69,6 +69,23 @@ public static class OdinCrypto
         public override string ToString() => "FileKey(…)";
     }
 
+    /// <summary>
+    /// The file key of an uploaded object, derived from the drive key and the
+    /// object's uniqueId: HKDF-SHA256(drive key, salt = uniqueId, info =
+    /// "ente-homebase-object"), 32 bytes = AES key ‖ IV. The IV is also the
+    /// payload's IV. The proxy can then read an object's payload without first
+    /// reading its header (Odin doesn't send a zkDrive file's key header with
+    /// the payload). Objects are written once and never changed, so each key
+    /// encrypts one payload. The key is still locked in the file's key header,
+    /// so other Homebase clients read the file as usual.
+    /// </summary>
+    public static FileKey DeriveObjectKey(byte[] driveKey, Guid uniqueId)
+    {
+        var okm = HKDF.DeriveKey(HashAlgorithmName.SHA256, driveKey, 32,
+            uniqueId.ToByteArray(bigEndian: true), Encoding.UTF8.GetBytes("ente-homebase-object"));
+        return new FileKey(okm[..16], okm[16..]);
+    }
+
     /// <summary>A zkDrive key header: AES-CBC(DrvK, file IV, IV ‖ AesKey), 48 bytes.</summary>
     public static JsonObject LockFileKey(FileKey fileKey, byte[] driveKey) => new()
     {

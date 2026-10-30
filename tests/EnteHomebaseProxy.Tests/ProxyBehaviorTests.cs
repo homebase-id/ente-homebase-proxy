@@ -141,7 +141,8 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
         var mapped = proxy.App.Services.GetRequiredService<EndpointDataSource>().Endpoints
             .OfType<RouteEndpoint>()
             .SelectMany(e => (e.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.IHttpMethodMetadata>()?.HttpMethods
-                              ?? []).Select(m => (Method: m, Path: "/" + e.RoutePattern.RawText!.TrimStart('/'))))
+                              ?? []).Select(m => (Method: m,
+                Path: "/" + Regex.Replace(e.RoutePattern.RawText!.TrimStart('/'), @"\{(\w+):\w+\}", "{$1}"))))
             .ToHashSet();
 
         var missing = enteRoutes.Where(r => !mapped.Contains(r) && !mapped.Contains((r.Method, r.Path.TrimEnd('/'))))
@@ -151,6 +152,19 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
         var todos = proxy.App.Services.GetRequiredService<EndpointDataSource>().Endpoints
             .Select(e => e.Metadata.GetMetadata<Todo.TodoReason>()).OfType<Todo.TodoReason>().ToList();
         Assert.All(todos, t => Assert.True(t.Reason.Length > 20, t.Reason));
+    }
+
+    /// <summary>No route is mapped twice (ASP.NET would throw on every request to it).</summary>
+    [Fact]
+    public void NoRouteIsMappedTwice()
+    {
+        var duplicates = proxy.App.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            .OfType<RouteEndpoint>()
+            .SelectMany(e => (e.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.IHttpMethodMetadata>()?.HttpMethods
+                              ?? []).Select(m => $"{m} " + Regex.Replace(e.RoutePattern.RawText!.TrimStart('/'),
+                @"\{(\w+):\w+\}", "{$1}")))
+            .GroupBy(r => r).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        Assert.True(duplicates.Count == 0, "Mapped twice: " + string.Join(", ", duplicates));
     }
 
     private static string FindUp(string relative)
