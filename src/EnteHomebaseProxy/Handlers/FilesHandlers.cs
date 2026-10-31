@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EnteHomebaseProxy.Odin;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Net.Http.Headers;
 
 namespace EnteHomebaseProxy.Handlers;
 
@@ -8,39 +10,46 @@ namespace EnteHomebaseProxy.Handlers;
 /// Ente's /files routes (server/cmd/museum/main.go), except sharing (see
 /// <see cref="SharingHandlers"/>) and trash (see <see cref="TrashHandlers"/>).
 ///
-/// Uploads follow Ente's two phases (STATUS.md, decision 2): the client gets
-/// upload URLs, PUTs each object's bytes there (here, to the proxy, with its
-/// X-Auth-Token; never credentials in a URL), then creates the photo record.
-/// The photo's ID is its thumbnail's object number, so a thumbnail downloads
-/// in one Odin call and an original in two.
+/// A photo is one Homebase file, Homebase's way (STATUS.md, decision 2): Ente's
+/// record as content, the original as the payload, and Ente's thumbnail as
+/// that payload's thumbnail. In Homebase mode the web app uploads all three in
+/// one request (<see cref="UploadPath"/>) instead of Ente's upload URLs and
+/// POST /files. A thumbnail or an original then downloads in one Odin call.
 /// </summary>
 public static class FilesHandlers
 {
-    /// <summary>Where object bytes are PUT (the proxy's stand-in for a presigned S3 URL).</summary>
-    public const string ObjectsPath = "/homebase/objects";
+    /// <summary>Where the web app uploads a photo in Homebase mode.</summary>
+    public const string UploadPath = "/homebase/files";
 
-    /// <summary>The largest object accepted (Ente's single-part uploads, decision 2).</summary>
-    private const long MaxObjectBytes = 1L << 30; // 1 GiB
+    /// <summary>The largest original accepted (one request, no multipart).</summary>
+    private const long MaxUploadBytes = 1L << 30; // 1 GiB
+
+    /// <summary>Ente's thumbnails are at most 100 KB; this leaves room.</summary>
+    private const int MaxThumbnailBytes = 1 << 20; // 1 MiB
+
+    private const int MaxRequestJsonBytes = 64 << 10; // 64 KiB
+
+    private const string OneRequest =
+        "Homebase mode uploads a photo in one request (POST " + UploadPath + "): the original, its thumbnail " +
+        "and the record, as one Homebase file.";
 
     public static void Map(IEndpointRouteBuilder app)
     {
-        app.MapGet("/files/upload-urls", GetUploadUrls);
-        app.MapPost("/files/upload-url", GetUploadUrl);
-        app.MapPut(ObjectsPath + "/{objectKey:long}", PutObject)
-            .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxObjectBytes));
-        app.MapPost("/files", Create);
+        app.MapPost(UploadPath, Upload)
+            .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxUploadBytes + (2 << 20)));
         app.MapGet("/files/preview/{fileID:long}", GetThumbnail);
         app.MapGet("/files/download/{fileID:long}", GetFile);
 
+        Todo.Map(app, "GET", "/files/upload-urls", OneRequest);
+        Todo.Map(app, "POST", "/files/upload-url", OneRequest);
+        Todo.Map(app, "POST", "/files", OneRequest);
         Todo.Map(app, "GET", "/files/upload-eligibility",
             "Checks storage quota before an upload. Odin enforces quota on the upload itself (507); there's " +
             "no read-only quota check to call.");
         Todo.Map(app, "GET", "/files/multipart-upload-urls",
-            "Multipart uploads would need the proxy to assemble parts (state). Homebase mode uploads each " +
-            "file in one PUT (decision 2).");
+            "Multipart uploads would need the proxy to assemble parts (state). " + OneRequest);
         Todo.Map(app, "POST", "/files/multipart-upload-url",
-            "Multipart uploads would need the proxy to assemble parts (state). Homebase mode uploads each " +
-            "file in one PUT (decision 2).");
+            "Multipart uploads would need the proxy to assemble parts (state). " + OneRequest);
         Todo.Map(app, "GET", "/files/download/v2/{fileID}", Why.PresignedUrls);
         Todo.Map(app, "GET", "/files/download/v3/{fileID}", Why.PresignedUrls);
         Todo.Map(app, "GET", "/files/preview/v2/{fileID}", Why.PresignedUrls);
@@ -82,86 +91,37 @@ public static class FilesHandlers
             "Public count of all files ever stored on Ente (marketing); there's nothing to ask Homebase.");
     }
 
-    private static JsonObject UploadUrl(HttpContext context) => new()
-    {
-        ["objectKey"] = EnteIds.NewId().ToString(),
-        ["url"] = $"{context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{ObjectsPath}/",
-    };
 
-    /// <summary>GET /files/upload-urls?count: where to PUT objects. No Odin call (decision 5).</summary>
-    private static IResult GetUploadUrls(HttpContext context)
+    /// <summary>
+    /// POST /homebase/files: a new photo in an album, in one multipart request
+    /// whose parts come in this order: "request" (Ente's POST /files body,
+    /// without objectKeys), "thumbnail" (Ente's encrypted thumbnail), "file"
+    /// (Ente's encrypted original, streamed through to Odin, never buffered).
+    /// Two Odin calls (decision 4): the photo, then its membership in the album.
+    /// The proxy picks the photo's ID.
+    /// </summary>
+    private static async Task<IResult> Upload(HttpContext context, OdinClient odin, CancellationToken ct)
     {
-        if (!EnteResults.TryGetCredentials(context, out _, out var failure)) return failure!;
-        var count = Math.Clamp((int)(EnteRecords.QueryLong(context, "count") ?? 1), 1, 50);
-        var urls = new JsonArray();
-        for (var i = 0; i < count; i++)
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (!MediaTypeHeaderValue.TryParse(context.Request.ContentType, out var type) ||
+            HeaderUtilities.RemoveQuotes(type.Boundary).Value is not { Length: > 0 } boundary)
         {
-            var url = UploadUrl(context);
-            url["url"] = url["url"]!.GetValue<string>() + url["objectKey"]!.GetValue<string>();
-            urls.Add(url);
+            return EnteResults.Status(400);
         }
 
-        return Results.Json(new JsonObject { ["urls"] = urls });
-    }
+        var reader = new MultipartReader(boundary, context.Request.Body);
 
-    /// <summary>POST /files/upload-url {contentLength, contentMD5}: one place to PUT an object. No Odin call.</summary>
-    private static IResult GetUploadUrl(HttpContext context)
-    {
-        if (!EnteResults.TryGetCredentials(context, out _, out var failure)) return failure!;
-        var url = UploadUrl(context);
-        url["url"] = url["url"]!.GetValue<string>() + url["objectKey"]!.GetValue<string>();
-        return Results.Json(url);
-    }
-
-    /// <summary>
-    /// PUT /homebase/objects/{objectKey}: an object's bytes (Ente's ciphertext).
-    /// One Odin call: create the object's file with the bytes as its payload,
-    /// encrypted with the object's derived key (<see cref="OdinCrypto.DeriveObjectKey"/>).
-    /// A repeated PUT of the same object (a client retry) is accepted as is.
-    /// </summary>
-    private static async Task<IResult> PutObject(long objectKey, HttpContext context, OdinClient odin,
-        CancellationToken ct)
-    {
-        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
-        if (objectKey is <= 0 or > EnteIds.MaxSafeInteger) return EnteResults.Status(400);
-
-        using var buffer = new MemoryStream();
-        await context.Request.Body.CopyToAsync(buffer, ct);
-        var uid = EnteIds.ToGuid(EnteIds.Kind.Object, objectKey);
-        var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(uid, EnteDrive.ObjectFileType, Content: null)
-            {
-                FileKey = OdinCrypto.DeriveObjectKey(credentials.DriveKey, uid),
-                Payload = (EnteDrive.ObjectPayloadKey, buffer.ToArray()),
-            }, ct);
-        if (response.IsSuccess || response.IsExistingUniqueId) return Results.Ok();
-        return EnteResults.OdinFailure(response);
-    }
-
-    private static long? ObjectNumber(JsonNode? objectAttributes) =>
-        long.TryParse(objectAttributes?["objectKey"]?.GetValue<string>(), out var n) &&
-        n is > 0 and <= EnteIds.MaxSafeInteger
-            ? n
-            : null;
-
-    /// <summary>
-    /// POST /files: a new photo in an album, after its objects were PUT. Two
-    /// Odin calls (decision 4): the photo's record, then its membership in the
-    /// album (the album's copy of the photo's key). The photo's ID is its
-    /// thumbnail's object number.
-    /// </summary>
-    private static async Task<IResult> Create(HttpContext context, OdinClient odin, CancellationToken ct)
-    {
-        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        var section = await reader.ReadNextSectionAsync(ct);
+        if (Name(section) != "request" ||
+            await ReadAtMost(section!.Body, MaxRequestJsonBytes, ct) is not { } requestBytes)
+        {
+            return EnteResults.Status(400);
+        }
 
         JsonObject body;
         try
         {
-            if (await JsonNode.ParseAsync(context.Request.Body, cancellationToken: ct) is not JsonObject parsed)
-            {
-                return EnteResults.Status(400);
-            }
-
+            if (JsonNode.Parse(requestBytes) is not JsonObject parsed) return EnteResults.Status(400);
             body = parsed;
         }
         catch (JsonException)
@@ -169,30 +129,46 @@ public static class FilesHandlers
             return EnteResults.Status(400);
         }
 
+        section = await reader.ReadNextSectionAsync(ct);
+        if (Name(section) != "thumbnail" ||
+            await ReadAtMost(section!.Body, MaxThumbnailBytes, ct) is not { Length: > 0 } thumbnail)
+        {
+            return EnteResults.Status(400);
+        }
+
+        section = await reader.ReadNextSectionAsync(ct);
+        if (Name(section) != "file") return EnteResults.Status(400);
+
         var collectionID = body["collectionID"]?.GetValueKind() == JsonValueKind.Number
             ? body["collectionID"]!.GetValue<long>()
             : 0;
-        var fileObject = ObjectNumber(body["file"]);
-        var thumbnailObject = ObjectNumber(body["thumbnail"]);
-        if (collectionID is <= 0 or > EnteIds.MaxSafeInteger || fileObject is null || thumbnailObject is null ||
+        if (collectionID is <= 0 or > EnteIds.MaxSafeInteger ||
+            body["file"]?["decryptionHeader"] is null || body["thumbnail"]?["decryptionHeader"] is null ||
             body["encryptedKey"] is null || body["keyDecryptionNonce"] is null || body["metadata"] is null)
         {
             return EnteResults.Status(400);
         }
 
-        var fileID = thumbnailObject.Value;
-        var ownerID = EnteIds.UserId(credentials.Identity);
+        var fileID = EnteIds.NewId();
         var record = new JsonObject
         {
             ["id"] = fileID,
-            ["ownerID"] = ownerID,
-            ["file"] = body["file"]!.DeepClone(),
-            ["thumbnail"] = body["thumbnail"]!.DeepClone(),
+            ["ownerID"] = EnteIds.UserId(credentials.Identity),
+            ["file"] = new JsonObject
+            {
+                ["decryptionHeader"] = body["file"]!["decryptionHeader"]!.DeepClone(),
+                ["size"] = body["file"]?["size"]?.DeepClone(),
+            },
+            ["thumbnail"] = new JsonObject
+            {
+                ["decryptionHeader"] = body["thumbnail"]!["decryptionHeader"]!.DeepClone(),
+                ["size"] = thumbnail.Length,
+            },
             ["metadata"] = body["metadata"]!.DeepClone(),
             ["info"] = new JsonObject
             {
                 ["fileSize"] = body["file"]?["size"]?.DeepClone(),
-                ["thumbSize"] = body["thumbnail"]?["size"]?.DeepClone(),
+                ["thumbSize"] = thumbnail.Length,
             },
         };
         if (body["pubMagicMetadata"] is { } pub) record["pubMagicMetadata"] = pub.DeepClone();
@@ -208,11 +184,22 @@ public static class FilesHandlers
         var fileGuid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
         var collectionGuid = EnteIds.ToGuid(EnteIds.Kind.Collection, collectionID);
 
-        var recordResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(fileGuid, EnteDrive.FileRecordFileType, record.ToJsonString()) { Tags = [fileGuid] },
-            ct);
-        if (recordResponse.IsExistingUniqueId) return EnteResults.Status(409);
-        if (!recordResponse.IsSuccess) return EnteResults.OdinFailure(recordResponse);
+        var photoResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
+            new NewOdinFile(fileGuid, EnteDrive.FileRecordFileType, record.ToJsonString())
+            {
+                Tags = [fileGuid],
+                FileKey = OdinCrypto.DeriveObjectKey(credentials.DriveKey, fileGuid),
+                Payload = new OdinPayload(EnteDrive.PhotoPayloadKey, section!.Body, EnteDrive.EnteCiphertextType)
+                {
+                    Thumbnails =
+                    [
+                        new OdinThumbnail(thumbnail, EnteDrive.ThumbnailPixels, EnteDrive.ThumbnailPixels,
+                            EnteDrive.EnteCiphertextType),
+                    ],
+                },
+            }, ct);
+        if (photoResponse.IsExistingUniqueId) return EnteResults.Status(409);
+        if (!photoResponse.IsSuccess) return EnteResults.OdinFailure(photoResponse);
 
         var membershipResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
             new NewOdinFile(EnteIds.MembershipGuid(collectionID, fileID), EnteDrive.MembershipFileType,
@@ -226,38 +213,60 @@ public static class FilesHandlers
         return Results.Json(EnteRecords.File(record, membership, EnteRecords.NowMicros()));
     }
 
-    private static async Task<IResult> ObjectBytes(Microsoft.AspNetCore.Http.HttpContext context, OdinClient odin,
-        Auth.HomebaseCredentials credentials, long objectNumber, CancellationToken ct)
+    /// <summary>A multipart section's form name, or null.</summary>
+    private static string? Name(MultipartSection? section) =>
+        section is not null && ContentDispositionHeaderValue.TryParse(section.ContentDisposition, out var disposition)
+            ? HeaderUtilities.RemoveQuotes(disposition.Name).Value
+            : null;
+
+    /// <summary>All of <paramref name="stream"/>, or null if it's longer than <paramref name="max"/> bytes.</summary>
+    private static async Task<byte[]?> ReadAtMost(Stream stream, int max, CancellationToken ct)
     {
-        var uid = EnteIds.ToGuid(EnteIds.Kind.Object, objectNumber);
-        var (status, bytes) = await odin.GetPayloadByUniqueIdAsync(credentials, EnteDrive.Alias, uid,
-            EnteDrive.ObjectPayloadKey, ct);
-        if (status == 404) return EnteResults.Status(404);
-        if (bytes is null) return EnteResults.OdinFailure(new OdinResponse(status, null, null));
+        using var buffer = new MemoryStream();
+        var chunk = new byte[16 << 10];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > max) return null;
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
+
+    /// <summary>Bytes Odin returned, opened with the photo's derived key: Ente's ciphertext.</summary>
+    private static IResult Opened(Auth.HomebaseCredentials credentials, Guid uid, byte[] bytes)
+    {
         var key = OdinCrypto.DeriveObjectKey(credentials.DriveKey, uid);
         return Results.Bytes(OdinCrypto.AesCbcDecrypt(key.AesKey, key.Iv, bytes), "application/octet-stream");
     }
 
     /// <summary>
     /// GET /files/preview/{fileID}: the thumbnail's bytes (Ente's ciphertext).
-    /// One Odin call: the photo's ID is its thumbnail's object number.
+    /// One Odin call: the photo's payload's thumbnail. Photos uploaded before
+    /// thumbnails moved onto the payload have none, and are read from their
+    /// object file instead (a second call, only for those).
     /// </summary>
-    private static Task<IResult> GetThumbnail(long fileID, HttpContext context, OdinClient odin,
+    private static async Task<IResult> GetThumbnail(long fileID, HttpContext context, OdinClient odin,
         CancellationToken ct)
     {
-        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure))
-        {
-            return Task.FromResult(failure!);
-        }
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (fileID is <= 0 or > EnteIds.MaxSafeInteger) return EnteResults.Status(404);
 
-        if (fileID is <= 0 or > EnteIds.MaxSafeInteger) return Task.FromResult(EnteResults.Status(404));
-        return ObjectBytes(context, odin, credentials, fileID, ct);
+        var uid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
+        var (status, bytes) = await odin.GetThumbnailByUniqueIdAsync(credentials, EnteDrive.Alias, uid,
+            EnteDrive.PhotoPayloadKey, EnteDrive.ThumbnailPixels, EnteDrive.ThumbnailPixels, ct);
+        if (bytes is not null) return Opened(credentials, uid, bytes);
+        if (status != 404) return EnteResults.OdinFailure(new OdinResponse(status, null, null));
+
+        // Uploaded before the 2026-10-30 change: the photo's ID is its thumbnail's object number.
+        return await LegacyObjectBytes(odin, credentials, fileID, ct);
     }
 
     /// <summary>
     /// GET /files/download/{fileID}: the original's bytes (Ente's ciphertext).
-    /// Two Odin calls (decision 2): the photo's record, for its object, then
-    /// the object.
+    /// One Odin call: the photo's payload. Photos uploaded before the 2026-10-30 change
+    /// take two more: the record, for its object, then the object.
     /// </summary>
     private static async Task<IResult> GetFile(long fileID, HttpContext context, OdinClient odin,
         CancellationToken ct)
@@ -265,15 +274,38 @@ public static class FilesHandlers
         if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
         if (fileID is <= 0 or > EnteIds.MaxSafeInteger) return EnteResults.Status(404);
 
-        var response = await odin.GetHeaderByUniqueIdAsync(credentials, EnteDrive.Alias,
-            EnteIds.ToGuid(EnteIds.Kind.File, fileID), ct);
+        var uid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
+        var (status, bytes) = await odin.GetPayloadByUniqueIdAsync(credentials, EnteDrive.Alias, uid,
+            EnteDrive.PhotoPayloadKey, ct);
+        if (bytes is not null) return Opened(credentials, uid, bytes);
+        if (status != 404) return EnteResults.OdinFailure(new OdinResponse(status, null, null));
+
+        var response = await odin.GetHeaderByUniqueIdAsync(credentials, EnteDrive.Alias, uid, ct);
         if (response.Status == 404) return EnteResults.Status(404);
         if (!response.IsSuccess || response.Body is null) return EnteResults.OdinFailure(response);
-        if (ObjectNumber(EnteRecords.Content(response.Body, credentials)?["file"]) is not { } objectNumber)
+        if (LegacyObjectNumber(EnteRecords.Content(response.Body, credentials)?["file"]) is not { } objectNumber)
         {
-            return EnteResults.ApiError(502, "HOMEBASE_ERROR", "The photo's record has no object");
+            return EnteResults.Status(404);
         }
 
-        return await ObjectBytes(context, odin, credentials, objectNumber, ct);
+        return await LegacyObjectBytes(odin, credentials, objectNumber, ct);
+    }
+
+    private static long? LegacyObjectNumber(JsonNode? objectAttributes) =>
+        long.TryParse(objectAttributes?["objectKey"]?.GetValue<string>(), out var n) &&
+        n is > 0 and <= EnteIds.MaxSafeInteger
+            ? n
+            : null;
+
+    /// <summary>An object file's bytes (how photos were stored before the 2026-10-30 change).</summary>
+    private static async Task<IResult> LegacyObjectBytes(OdinClient odin, Auth.HomebaseCredentials credentials,
+        long objectNumber, CancellationToken ct)
+    {
+        var uid = EnteIds.ToGuid(EnteIds.Kind.Object, objectNumber);
+        var (status, bytes) = await odin.GetPayloadByUniqueIdAsync(credentials, EnteDrive.Alias, uid,
+            EnteDrive.ObjectPayloadKey, ct);
+        if (status == 404) return EnteResults.Status(404);
+        if (bytes is null) return EnteResults.OdinFailure(new OdinResponse(status, null, null));
+        return Opened(credentials, uid, bytes);
     }
 }

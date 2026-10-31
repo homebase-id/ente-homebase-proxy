@@ -45,11 +45,9 @@ The test photo (a 320×240 checkerboard) is still in your Ente library on frodo.
 | `POST /collections`, `GET /collections/{id}` | 1 | An album: Ente's collection (client-encrypted) as content |
 | `GET /collections/v2` | 1 | Every album; each album's updationTime is *now* (see below) |
 | `GET /collections/v2/diff` | 2 | The album's memberships, then their photo records |
-| `GET /files/upload-urls`, `POST /files/upload-url` | 0 | URLs on the proxy (`/homebase/objects/{n}`); objectKey = a new number |
-| `PUT /homebase/objects/{n}` | 1 | The bytes as one payload, with a derived object key (below); up to 1 GiB |
-| `POST /files` | 2 | The photo record, then its membership; photo ID = the thumbnail's object number |
-| `GET /files/preview/{id}` | 1 | The thumbnail's bytes |
-| `GET /files/download/{id}` | 2 | The record (for the original's object), then the object |
+| `POST /homebase/files` | 2 | A photo in one request (decision 2): one Homebase file, then its membership; up to 1 GiB, streamed |
+| `GET /files/preview/{id}` | 1 | The thumbnail of the photo's payload |
+| `GET /files/download/{id}` | 1 | The photo's payload |
 | `GET`/`POST /user-entity/key` | 1 | The key for one type of people/places data |
 | `/remote-store/feature-flags`, `/contacts/diff`, `/trash/v2/diff`, `/user-entity/entity/diff`, `/collection-actions/pending-remove` | 0 | Empty: nothing of that kind can exist yet |
 
@@ -67,15 +65,21 @@ the real key attributes file exists.
   instead every pull syncs every album (each sync returns only changes). The sync looks 10
   minutes back from sinceTime, since the client may store the proxy's clock while changes carry
   Odin's; repeats are harmless.
-- **Object keys are derived** (`OdinCrypto.DeriveObjectKey`: HKDF of the drive key and the
-  object's uniqueId). Odin doesn't send a zero-knowledge file's key with its payload, so
-  otherwise every byte read would need its header first. Objects are written once; the key is
-  also locked in the file's key header, so other Homebase clients read them normally.
+- **Photo keys are derived** (`OdinCrypto.DeriveObjectKey`: HKDF of the drive key and the
+  photo's uniqueId). Odin doesn't send a zero-knowledge file's key with its payload, so
+  otherwise every byte read would need its header first. The key is also locked in the file's
+  key header, so other Homebase clients read them normally.
+- **The thumbnail is filed as 720×720.** It's Ente's ciphertext, so its real size is unknown;
+  Ente makes them at most 720 px. Other Homebase apps can't show it (nor the original): both
+  are encrypted with Ente's keys inside Homebase's.
+- **Photos uploaded before the 2026-10-30 change** kept the original and thumbnail as two separate object
+  files (7204). They still read: when the photo file has no payload, the proxy falls back to
+  the objects (two more calls). Remove the fallback once those photos are re-uploaded.
 - **No paging yet**: an album sync reads at most 1000 memberships, the album list 1000 albums.
 - **Security (prototype)**: the web app keeps the X-Auth-Token, which holds the drive key, where
   Ente keeps its auth token (localStorage and IndexedDB, unencrypted).
-- **A failed `POST /files` leaves orphaned objects** (bytes with no record). One happened during
-  development; those two objects were deleted.
+- **A failed upload leaves at most an orphaned photo with no album** (the photo file was made,
+  its membership wasn't). The client doesn't retry, since a retry would add a second photo.
 
 ## What's 501 and why
 
@@ -110,7 +114,7 @@ Built for milestones A and B (the routes above); the rest of the TODOs follow th
    | `01` | photo (file record) | `01` ‖ 7 zero bytes ‖ file ID (8 bytes) |
    | `02` | album (collection) | `02` ‖ 7 zero bytes ‖ collection ID |
    | `03` | album membership | `03` ‖ collection ID (7 bytes) ‖ file ID |
-   | `04` | uploaded object (bytes) | `04` ‖ 7 zero bytes ‖ object number |
+   | `04` | uploaded object (bytes, before the 2026-10-30 change) | `04` ‖ 7 zero bytes ‖ object number |
 
    The proxy picks new numbers: **milliseconds since 1970 × 2048 + random 0–2047**. They stay
    below 2^53 (JavaScript's exact-integer limit) until about 2109, and they increase with
@@ -120,15 +124,17 @@ Built for milestones A and B (the routes above); the rest of the TODOs follow th
    listing. A soft-deleted Odin file loses its uniqueId, so the photo and album IDs also go
    in tags.
 
-2. **Uploads and downloads (option A).** Ente's two-phase upload stays:
-   - `GET /files/upload-urls` returns proxy URLs; each `objectKey` is a new number.
-   - Each `PUT` stores the bytes as an object file (type `04`): one call.
-   - `POST /files` stores the photo record, using the **thumbnail's** object number as the
-     file ID: one call.
-   - Thumbnails download in one call; originals in two (read the record, then the object).
-   - Client change, Homebase mode only: send X-Auth-Token on the byte `PUT`s and downloads
-     (`web/packages/gallery/services/upload/remote.ts`, `web/packages/base/file-download.ts`),
-     and no multipart uploads (one `PUT` per file).
+2. **A photo is one Homebase file, Homebase's way** (changed 2026-10-30, from separate
+   object files, after chat-kmp's model): the record as content, the original as the payload
+   (`entefile`), and Ente's thumbnail as **that payload's thumbnail**, sent with it.
+   - Client change, Homebase mode only: instead of Ente's upload URLs, byte `PUT`s and
+     `POST /files`, one multipart `POST /homebase/files` with the record, thumbnail and
+     original (`upload-service.ts` `uploadToHomebase`, `remote.ts` `postHomebaseEnteFile`).
+     The proxy streams the original through; the photo's ID is a new number.
+   - Upload: 2 calls (the photo, its membership). Thumbnail: 1 call. Original: 1 call.
+   - Downloads send X-Auth-Token (`web/packages/base/file-download.ts`).
+   - Not yet: Homebase's tiny inline `previewThumbnail` and its WebP size ladder. The proxy
+     only sees Ente's ciphertext, so the web app would have to make them.
 
 3. **No credentials in URLs, ever.** The X-Auth-Token holds the drive key, which can't be
    revoked. So no presigned-style URLs and no `?token=`: credentials only in the header.

@@ -38,5 +38,5 @@ https://ente.ravenhosting.cloud, on blackbird-aux, the same way as raven-hosting
 Set up once: the `deploy` environment with `CONTROLLER_DEPLOY_KEY`, and the ghcr package made public, since
 blackbird-aux pulls it without logging in.
 
-Settings: `TRUST_FORWARDED_HEADERS=true` behind Caddy (so upload URLs are https), `WEB_ROOT`
+Settings: `TRUST_FORWARDED_HEADERS=true` behind Caddy (so the proxy sees https), `WEB_ROOT`
 (default `client/photos`), `ALLOWED_ORIGINS` (CORS, only for a web app on another origin).
