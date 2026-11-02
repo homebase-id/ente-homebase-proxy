@@ -33,6 +33,14 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
+    [Fact]
+    public async Task VersionIsNullWhereNotKnown()
+    {
+        var response = await proxy.Client.GetAsync("/version", Ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("""{"proxy":null,"web":null}""", await response.Content.ReadAsStringAsync(Ct));
+    }
+
     [Theory]
     [InlineData("GET", "/users/session-validity/v2")]
     [InlineData("PUT", "/users/attributes")]

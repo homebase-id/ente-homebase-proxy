@@ -3,8 +3,12 @@ using System.Net;
 namespace EnteHomebaseProxy.Tests;
 
 /// <summary>The proxy with a (made up) web app build in WEB_ROOT.</summary>
-public sealed class WebAppServer() : ProxyServer([$"--{WebApp.RootSetting}={Root}"])
+public sealed class WebAppServer() : ProxyServer([$"--{WebApp.RootSetting}={Root}",
+    $"--{BuildVersion.ProxyCommitSetting}={ProxyCommit}"])
 {
+    public const string ProxyCommit = "d6cf82a0000000000000000000000000000000aa";
+    public const string WebCommit = "377ee2bc709f24ebac5599fab961ba5387fe4cc1";
+
     private static readonly string Root = MakeRoot();
 
     private static string MakeRoot()
@@ -22,6 +26,7 @@ public sealed class WebAppServer() : ProxyServer([$"--{WebApp.RootSetting}={Root
         Write("homebase.html", "homebase");
         Write("homebase/callback.html", "callback");
         Write("_next/static/chunks/app.js", "js");
+        Write(BuildVersion.WebVersionFile, $$"""{"commit":"{{WebCommit}}"}""");
         return root;
     }
 
@@ -53,6 +58,19 @@ public class WebAppTests(WebAppServer proxy) : IClassFixture<WebAppServer>
         Assert.Equal(page, await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         Assert.Equal("no-cache", response.Headers.CacheControl?.ToString());
         Assert.Equal("deny", response.Headers.GetValues("X-Frame-Options").Single());
+    }
+
+    [Theory]
+    [InlineData("/version")]
+    [InlineData("/api/version")]
+    public async Task VersionIsTheProxysAndTheWebAppsCommit(string path)
+    {
+        var response = await proxy.Client.GetAsync(path, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
+        Assert.Equal($$"""{"proxy":"{{WebAppServer.ProxyCommit}}","web":"{{WebAppServer.WebCommit}}"}""",
+            await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
