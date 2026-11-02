@@ -70,10 +70,10 @@ The test photo and its album (Uncategorized) are in your Ente library on frodo.
 | `/remote-store/feature-flags`, `/contacts/diff`, `/trash/v2/diff`, `/user-entity/entity/diff`, `/collection-actions/pending-remove` | 0 | Empty: nothing of that kind can exist yet |
 
 Plus: Odin's encryption checked against the TypeScript and Node vectors; X-Auth-Token parsing;
-every Ente route in the five groups mapped and none mapped twice; `/health`; X-Request-Id; CORS
+every Ente route in the five groups mapped and none mapped twice; `/health`; `/version` (the proxy's and the web app's commits); X-Request-Id; CORS
 (`Content-MD5` allowed for uploads); logs hold no token, query or body; Docker image.
 
-62 tests, all passing with `HOMEBASE_CREDENTIALS` set (2026-11-02). The key endpoint test ran
+65 tests, all passing with `HOMEBASE_CREDENTIALS` set (2026-11-02). The key endpoint test ran
 because the old key attributes file had just been deleted; it skips again once you sign in.
 
 ## Worth knowing

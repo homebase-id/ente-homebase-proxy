@@ -18,5 +18,8 @@ COPY client/photos client/photos
 ENV ASPNETCORE_URLS=http://0.0.0.0:8095 \
     ALLOWED_ORIGINS=http://localhost:3020
 EXPOSE 8095
+# What GET /version reports as the proxy's commit; the deploy workflow sets it.
+ARG PROXY_COMMIT=""
+ENV PROXY_COMMIT=$PROXY_COMMIT
 USER $APP_UID
 ENTRYPOINT ["dotnet", "EnteHomebaseProxy.dll"]

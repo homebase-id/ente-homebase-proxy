@@ -35,6 +35,9 @@ https://ente.ravenhosting.cloud, on blackbird-aux, the same way as raven-hosting
    environment). The controller only accepts what the DevOps repo allowlists; its playbook
    `deploy-ente-homebase-proxy.yml` runs the container on `127.0.0.1:8085`, behind Caddy.
 
+To see what's deployed: `curl https://ente.ravenhosting.cloud/version` gives the proxy's commit
+and the web app's (`{"proxy": "<sha>", "web": "<sha>"}`; null where unknown, as in a local run).
+
 Set up once: the `deploy` environment with `CONTROLLER_DEPLOY_KEY`, and the ghcr package made public, since
 blackbird-aux pulls it without logging in.
 

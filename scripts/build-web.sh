@@ -28,4 +28,6 @@ NEXT_PUBLIC_ENTE_HOMEBASE_PROXY=/api npm run build:photos
 rm -rf "$here/client/photos"
 mkdir -p "$here/client"
 cp -R apps/photos/out "$here/client/photos"
+# What GET /version reports as the web app's commit (BuildVersion.cs).
+printf '{"commit":"%s"}\n' "$head" >"$here/client/photos/version.json"
 echo "Built $head into client/photos"

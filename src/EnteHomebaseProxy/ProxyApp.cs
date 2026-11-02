@@ -72,6 +72,7 @@ public static partial class ProxyApp
         WebApp.Use(app);
 
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+        BuildVersion.Map(app);
         AuthHandlers.Map(app);
         FilesHandlers.Map(app);
         CollectionsHandlers.Map(app);

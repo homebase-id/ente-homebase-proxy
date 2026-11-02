@@ -14,10 +14,14 @@ public static class WebApp
     public const string RootSetting = "WEB_ROOT";
     public const string DefaultRoot = "client/photos";
 
+    /// <summary>The web app's folder: WEB_ROOT, else client/photos.</summary>
+    public static string Root(WebApplication app) =>
+        app.Configuration[RootSetting] ?? Path.Combine(app.Environment.ContentRootPath, DefaultRoot);
+
     /// <summary>Adds the web app, if its folder exists. Returns whether it did.</summary>
     public static bool Use(WebApplication app)
     {
-        var root = app.Configuration[RootSetting] ?? Path.Combine(app.Environment.ContentRootPath, DefaultRoot);
+        var root = Root(app);
         if (!File.Exists(Path.Combine(root, "index.html"))) return false;
 
         var files = new PhysicalFileProvider(Path.GetFullPath(root));

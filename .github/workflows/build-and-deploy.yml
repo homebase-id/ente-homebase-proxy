@@ -142,6 +142,7 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.image_ref }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: PROXY_COMMIT=${{ github.sha }}
           platforms: linux/amd64,linux/arm64
           provenance: false
           cache-from: type=gha
