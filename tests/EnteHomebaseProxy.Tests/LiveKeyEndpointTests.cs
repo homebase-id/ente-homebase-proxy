@@ -72,9 +72,11 @@ public class LiveKeyEndpointTests(ProxyServer proxy) : IClassFixture<ProxyServer
             Assert.True(JsonNode.DeepEquals(JsonNode.Parse("""{"hasSetKeys":false}"""),
                 JsonNode.Parse(await before.Content.ReadAsStringAsync(Ct))));
 
+            // Sealed as the web app does, with the drive key the proxy never gets.
             var keyAttributes = SampleKeyAttributes();
+            var sealedRecord = live.Seal(keyAttributes.ToJsonString(), LiveHomebase.FileKey.New());
             var put = await proxy.Client.SendAsync(Request(HttpMethod.Put, "/users/attributes", live,
-                new JsonObject { ["keyAttributes"] = keyAttributes.DeepClone() }.ToJsonString()), Ct);
+                new JsonObject { ["homebase"] = sealedRecord.DeepClone() }.ToJsonString()), Ct);
             Assert.Equal(HttpStatusCode.OK, put.StatusCode);
 
             var after = await proxy.Client.SendAsync(
@@ -82,17 +84,20 @@ public class LiveKeyEndpointTests(ProxyServer proxy) : IClassFixture<ProxyServer
             Assert.Equal(HttpStatusCode.OK, after.StatusCode);
             var body = JsonNode.Parse(await after.Content.ReadAsStringAsync(Ct))!;
             Assert.True(body["hasSetKeys"]!.GetValue<bool>());
-            Assert.True(JsonNode.DeepEquals(keyAttributes, body["keyAttributes"]),
-                "keyAttributes didn't come back as sent");
+            Assert.True(JsonNode.DeepEquals(sealedRecord, body["homebase"]), "The sealed record didn't come back as sent");
+            Assert.True(JsonNode.DeepEquals(keyAttributes, JsonNode.Parse(live.Open(body["homebase"]!))));
 
             var second = await proxy.Client.SendAsync(Request(HttpMethod.Put, "/users/attributes", live,
-                new JsonObject { ["keyAttributes"] = SampleKeyAttributes() }.ToJsonString()), Ct);
+                new JsonObject
+                {
+                    ["homebase"] = live.Seal(SampleKeyAttributes().ToJsonString(), LiveHomebase.FileKey.New()),
+                }.ToJsonString()), Ct);
             Assert.Equal(HttpStatusCode.Forbidden, second.StatusCode);
 
             // Still the first one: never overwritten.
             var still = JsonNode.Parse(await (await proxy.Client.SendAsync(
                 Request(HttpMethod.Get, "/users/session-validity/v2", live), Ct)).Content.ReadAsStringAsync(Ct))!;
-            Assert.True(JsonNode.DeepEquals(keyAttributes, still["keyAttributes"]));
+            Assert.True(JsonNode.DeepEquals(sealedRecord, still["homebase"]));
         }
         finally
         {
@@ -113,7 +118,7 @@ public class LiveKeyEndpointTests(ProxyServer proxy) : IClassFixture<ProxyServer
             Identity = live.Identity,
             ClientAuthToken = RandomNumberGenerator.GetBytes(33),
             SharedSecret = RandomNumberGenerator.GetBytes(16),
-            DriveKey = RandomNumberGenerator.GetBytes(16),
+            DriveKey = [],
         };
         var response = await proxy.Client.SendAsync(
             Request(HttpMethod.Get, "/users/session-validity/v2", forged), Ct);

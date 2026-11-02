@@ -12,7 +12,8 @@ namespace EnteHomebaseProxy.Tests;
 /// Test code only, never the proxy: Ente's own credentials from
 /// HOMEBASE_CREDENTIALS (written by scripts/consent.mjs), the drive key opened
 /// from the security context, and the X-Auth-Token an Ente client would send.
-/// Never prints a value from the credentials.
+/// The tests play the web app: they seal and open records with the drive key,
+/// which the proxy never gets. Never prints a value from the credentials.
 /// </summary>
 public sealed class LiveHomebase
 {
@@ -25,17 +26,56 @@ public sealed class LiveHomebase
 
     public string XAuthToken => Convert.ToBase64String(Encoding.UTF8.GetBytes(new JsonObject
     {
-        ["v"] = 1,
+        ["v"] = 2,
         ["identity"] = Identity,
         ["token"] = Convert.ToBase64String(ClientAuthToken),
         ["ss"] = Convert.ToBase64String(SharedSecret),
-        ["dk"] = Convert.ToBase64String(DriveKey),
     }.ToJsonString()))
         .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     public HomebaseCredentials Credentials => HomebaseCredentials.Parse(XAuthToken)!;
 
     public override string ToString() => $"LiveHomebase({Identity})";
+
+    /// <summary>A file's own key (AES-128 key and IV), as the web app makes one.</summary>
+    public sealed record FileKey(byte[] AesKey, byte[] Iv)
+    {
+        public static FileKey New() => new(RandomNumberGenerator.GetBytes(16), RandomNumberGenerator.GetBytes(16));
+
+        public override string ToString() => "FileKey(…)";
+    }
+
+    /// <summary>The web app's seal (ente-homebase records.ts): a zkDrive key header and the encrypted JSON.</summary>
+    public JsonObject Seal(string json, FileKey key) => new()
+    {
+        ["keyHeader"] = new JsonObject
+        {
+            ["encryptionVersion"] = 1,
+            ["type"] = "zkDrive",
+            ["iv"] = Convert.ToBase64String(key.Iv),
+            ["encryptedAesKey"] = Convert.ToBase64String(OdinCrypto.AesCbcEncrypt(DriveKey, key.Iv,
+                [.. key.Iv, .. key.AesKey])),
+        },
+        ["content"] = Convert.ToBase64String(OdinCrypto.AesCbcEncrypt(key.AesKey, key.Iv,
+            Encoding.UTF8.GetBytes(json))),
+    };
+
+    /// <summary>Opens a sealed record's key header with the drive key.</summary>
+    public FileKey OpenKey(JsonNode sealedRecord)
+    {
+        var header = sealedRecord["keyHeader"]!;
+        var combined = OdinCrypto.AesCbcDecrypt(DriveKey, Convert.FromBase64String(header["iv"]!.GetValue<string>()),
+            Convert.FromBase64String(header["encryptedAesKey"]!.GetValue<string>()));
+        return new FileKey(combined[16..], combined[..16]);
+    }
+
+    /// <summary>A sealed record's JSON, opened as the web app does.</summary>
+    public string Open(JsonNode sealedRecord)
+    {
+        var key = OpenKey(sealedRecord);
+        return Encoding.UTF8.GetString(OdinCrypto.AesCbcDecrypt(key.AesKey, key.Iv,
+            Convert.FromBase64String(sealedRecord["content"]!.GetValue<string>())));
+    }
 
     /// <summary>
     /// The live identity, or a skip if HOMEBASE_CREDENTIALS isn't set. Fails

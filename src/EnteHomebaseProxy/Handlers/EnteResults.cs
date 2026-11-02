@@ -100,6 +100,11 @@ public static class Why
         "Public links. Odin's anonymous drive access is a different model (circles, temporal reads); there's " +
         "no single Odin call that matches.";
 
+    public const string Entities =
+        "Ente's key for one type of user entity (people, places), locked with its master key. Those entities " +
+        "aren't kept on Homebase yet; when they are, each will be sealed by the web app with its own key, so " +
+        "this key isn't needed. The web app doesn't ask for it in Homebase mode.";
+
     public const string FileData =
         "Derived file data (ML embeddings, video previews). Would be a payload on the file's Odin file, " +
         "but finding that file needs the int64→GUID mapping. " + IntIds;

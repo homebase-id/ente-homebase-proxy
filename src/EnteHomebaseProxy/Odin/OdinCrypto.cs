@@ -6,10 +6,11 @@ using System.Text.Json.Nodes;
 namespace EnteHomebaseProxy.Odin;
 
 /// <summary>
-/// Odin's own encryption around its API traffic, ported from
-/// web/packages/homebase (context.ts, drive.ts) and checked against the same
-/// vectors. None of this touches Ente's encryption: what Ente encrypted is
-/// carried inside, unopened.
+/// Odin's transport encryption (the shared secret), ported from
+/// web/packages/homebase (context.ts) and checked against the same vectors.
+/// The proxy has no storage crypto: what's kept on the drive is encrypted by
+/// the web app (see <see cref="SealedRecord"/>), and the proxy has no key that
+/// opens it.
 /// </summary>
 public static class OdinCrypto
 {
@@ -19,17 +20,6 @@ public static class OdinCrypto
         using var aes = Aes.Create();
         aes.Key = key;
         return aes.EncryptCbc(plain, iv, PaddingMode.PKCS7);
-    }
-
-    /// <summary>AES-128-CBC with PKCS7, encrypting <paramref name="plain"/> as it's read (it's left open).</summary>
-    public static Stream AesCbcEncryptingStream(byte[] key, byte[] iv, Stream plain)
-    {
-        var aes = Aes.Create();
-        aes.Key = key;
-        aes.IV = iv;
-        aes.Mode = CipherMode.CBC;
-        aes.Padding = PaddingMode.PKCS7;
-        return new CryptoStream(plain, aes.CreateEncryptor(), CryptoStreamMode.Read, leaveOpen: true);
     }
 
     public static byte[] AesCbcDecrypt(byte[] key, byte[] iv, byte[] cipher)
@@ -72,54 +62,16 @@ public static class OdinCrypto
         return node;
     }
 
-    /// <summary>A file's own key: AES-128 key and IV, fresh for every new file.</summary>
-    public sealed record FileKey(byte[] AesKey, byte[] Iv)
-    {
-        public static FileKey New() => new(RandomNumberGenerator.GetBytes(16), RandomNumberGenerator.GetBytes(16));
-
-        public override string ToString() => "FileKey(…)";
-    }
-
     /// <summary>
-    /// The file key of an uploaded object, derived from the drive key and the
-    /// object's uniqueId: HKDF-SHA256(drive key, salt = uniqueId, info =
-    /// "ente-homebase-object"), 32 bytes = AES key ‖ IV. The IV is also the
-    /// payload's IV. The proxy can then read a photo's payload or thumbnail
-    /// without first reading its header (Odin doesn't send a zkDrive file's key
-    /// header with the payload). The key is still locked in the file's key
-    /// header, so other Homebase clients read the file as usual.
+    /// The key header of an unencrypted file, as Odin's clients send it
+    /// (chat-kmp lockKeyHeader with no key): an all-zero key header locked with
+    /// the shared secret under the transfer IV. It locks nothing.
     /// </summary>
-    public static FileKey DeriveObjectKey(byte[] driveKey, Guid uniqueId)
-    {
-        var okm = HKDF.DeriveKey(HashAlgorithmName.SHA256, driveKey, 32,
-            uniqueId.ToByteArray(bigEndian: true), Encoding.UTF8.GetBytes("ente-homebase-object"));
-        return new FileKey(okm[..16], okm[16..]);
-    }
-
-    /// <summary>A zkDrive key header: AES-CBC(DrvK, file IV, IV ‖ AesKey), 48 bytes.</summary>
-    public static JsonObject LockFileKey(FileKey fileKey, byte[] driveKey) => new()
+    public static JsonObject EmptyKeyHeader(byte[] sharedSecret, byte[] transferIv) => new()
     {
         ["encryptionVersion"] = 1,
-        ["type"] = "zkDrive",
-        ["iv"] = Convert.ToBase64String(fileKey.Iv),
-        ["encryptedAesKey"] = Convert.ToBase64String(
-            AesCbcEncrypt(driveKey, fileKey.Iv, [.. fileKey.Iv, .. fileKey.AesKey])),
+        ["type"] = "aes",
+        ["iv"] = Convert.ToBase64String(transferIv),
+        ["encryptedAesKey"] = Convert.ToBase64String(AesCbcEncrypt(sharedSecret, transferIv, new byte[32])),
     };
-
-    public static FileKey OpenFileKey(JsonNode header, byte[] driveKey)
-    {
-        var type = header["type"];
-        var isZk = type?.GetValueKind() switch
-        {
-            JsonValueKind.String => type.GetValue<string>() == "zkDrive",
-            JsonValueKind.Number => type.GetValue<int>() == 13,
-            _ => false,
-        };
-        if (!isZk) throw new CryptographicException("Not a zkDrive key header");
-
-        var combined = AesCbcDecrypt(driveKey, Convert.FromBase64String(header["iv"]!.GetValue<string>()),
-            Convert.FromBase64String(header["encryptedAesKey"]!.GetValue<string>()));
-        if (combined.Length != 32) throw new CryptographicException("A zkDrive key header holds 32 bytes");
-        return new FileKey(combined[16..], combined[..16]);
-    }
 }

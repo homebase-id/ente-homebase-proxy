@@ -1,11 +1,12 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using EnteHomebaseProxy.Odin;
 
 namespace EnteHomebaseProxy.Handlers;
 
 /// <summary>
 /// Ente's /users routes (server/cmd/museum/main.go). Two are real: storing and
-/// reading the key attributes, as one file on Ente's drive. Sign-in routes are
+/// reading the key attributes, sealed by the web app, as one file on Ente's drive. Sign-in routes are
 /// replaced by YouAuth; the rest are TODOs.
 /// </summary>
 public static class AuthHandlers
@@ -99,27 +100,26 @@ public static class AuthHandlers
     }
 
     /// <summary>
-    /// PUT /users/attributes, body {"keyAttributes": {...}}: keeps the key
-    /// attributes, as sent, as the content of the key attributes file. One Odin
-    /// call: create that file. A second call gets 403, as from Ente's server
-    /// when key attributes are already set; the file is never overwritten.
+    /// PUT /users/attributes, body {"homebase": sealed record}: the key
+    /// attributes, sealed by the web app, kept as the key attributes file. One
+    /// Odin call, which creates that file. A second call gets 403, as from
+    /// Ente's server when key attributes are already set; the file is never
+    /// overwritten.
     /// </summary>
     private static async Task<IResult> SetAttributes(HttpContext context, OdinClient odin, CancellationToken ct)
     {
         if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
 
-        string keyAttributes;
+        SealedRecord sealedRecord;
         try
         {
-            using var body = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: ct);
-            if (body.RootElement.ValueKind != JsonValueKind.Object ||
-                !body.RootElement.TryGetProperty("keyAttributes", out var attributes) ||
-                attributes.ValueKind != JsonValueKind.Object)
+            if (await JsonNode.ParseAsync(context.Request.Body, cancellationToken: ct) is not JsonObject body ||
+                SealedRecord.Read(body["homebase"]) is not { } read)
             {
                 return EnteResults.Status(400);
             }
 
-            keyAttributes = attributes.GetRawText();
+            sealedRecord = read;
         }
         catch (JsonException)
         {
@@ -127,16 +127,17 @@ public static class AuthHandlers
         }
 
         var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(EnteDrive.KeyAttributesUniqueId, EnteDrive.KeyAttributesFileType, keyAttributes), ct);
+            new NewOdinFile(EnteDrive.KeyAttributesUniqueId, EnteDrive.KeyAttributesFileType, sealedRecord), ct);
         if (response.IsSuccess) return Results.Ok();
         if (response.IsExistingUniqueId) return EnteResults.Status(403);
         return EnteResults.OdinFailure(response);
     }
 
     /// <summary>
-    /// GET /users/session-validity/v2: {"hasSetKeys": true, "keyAttributes"} from
-    /// the key attributes file, or {"hasSetKeys": false} if there's none yet. One
-    /// Odin call: read that file's header by its uniqueId.
+    /// GET /users/session-validity/v2: {"hasSetKeys": true, "homebase": sealed
+    /// record} from the key attributes file (the web app opens it), or
+    /// {"hasSetKeys": false} if there's none yet. One Odin call: read that
+    /// file's header by its uniqueId.
     /// </summary>
     private static async Task<IResult> GetSessionValidityV2(HttpContext context, OdinClient odin,
         CancellationToken ct)
@@ -147,28 +148,11 @@ public static class AuthHandlers
             EnteDrive.KeyAttributesUniqueId, ct);
         if (response.Status == 404) return Results.Json(new { hasSetKeys = false });
         if (!response.IsSuccess || response.Body is null) return EnteResults.OdinFailure(response);
-
-        var keyAttributes = OdinClient.DecryptContent(response.Body, credentials.DriveKey);
-        if (!IsJsonObject(keyAttributes))
+        if (SealedRecord.FromHeader(response.Body) is not { } sealedRecord)
         {
-            return EnteResults.ApiError(502, "HOMEBASE_ERROR", "The key attributes file isn't a JSON object");
+            return EnteResults.ApiError(502, "HOMEBASE_ERROR", "The key attributes file isn't sealed by the web app");
         }
 
-        // The stored JSON goes back as it was sent.
-        return Results.Text($$"""{"hasSetKeys":true,"keyAttributes":{{keyAttributes}}}""", "application/json");
-    }
-
-    private static bool IsJsonObject(string? json)
-    {
-        if (json is null) return false;
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            return document.RootElement.ValueKind == JsonValueKind.Object;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
+        return Results.Json(new JsonObject { ["hasSetKeys"] = true, ["homebase"] = sealedRecord.ToJson() });
     }
 }

@@ -30,22 +30,6 @@ public class ContractTests
         Assert.Equal(EnteDrive.PhotoFormat, photo["format"]!.GetValue<string>());
     }
 
-    /// <summary>The photo key the web app derives (photo.ts) is the proxy's, byte for byte.</summary>
-    [Fact]
-    public void ThePhotoKeyMatchesTheContractsTestValue()
-    {
-        var test = Contract["testValues"]!["photoKey"]!;
-        var driveKey = Convert.FromBase64String(test["driveKey"]!.GetValue<string>());
-        var uid = EnteIds.ToGuid(EnteIds.Kind.File, test["fileID"]!.GetValue<long>());
-        var key = Odin.OdinCrypto.DeriveObjectKey(driveKey, uid);
-
-        Assert.Equal(test["uniqueId"]!.GetValue<string>(), uid.ToString());
-        Assert.Equal(test["aesKey"]!.GetValue<string>(), Convert.ToHexStringLower(key.AesKey));
-        Assert.Equal(test["iv"]!.GetValue<string>(), Convert.ToHexStringLower(key.Iv));
-        Assert.Equal(test["ciphertext"]!.GetValue<string>(), Convert.ToBase64String(Odin.OdinCrypto.AesCbcEncrypt(
-            key.AesKey, key.Iv, System.Text.Encoding.UTF8.GetBytes(test["plaintext"]!.GetValue<string>()))));
-    }
-
     [Fact]
     public void TheUserIdMatchesTheContractsTestValue()
     {
@@ -58,8 +42,7 @@ public class ContractTests
     {
         int[] proxys =
         [
-            EnteDrive.CollectionFileType, EnteDrive.ObjectFileType, EnteDrive.UserEntityKeyFileType,
-            EnteDrive.FileRecordFileType, EnteDrive.MembershipFileType,
+            EnteDrive.CollectionFileType, EnteDrive.FileRecordFileType, EnteDrive.MembershipFileType,
         ];
         Assert.DoesNotContain(Contract["passwordFile"]!["fileType"]!.GetValue<int>(), proxys);
     }

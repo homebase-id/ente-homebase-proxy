@@ -86,23 +86,46 @@ public class WebAppTests(WebAppServer proxy) : IClassFixture<WebAppServer>
         Assert.Equal(HttpStatusCode.Unauthorized, noToken.StatusCode);
     }
 
+    // Shapes only: the proxy checks them, and never opens what's sealed.
+    private const string Sealed = """
+        {"keyHeader":{"encryptionVersion":1,"type":"zkDrive","iv":"AAAAAAAAAAAAAAAAAAAAAA==",
+         "encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+         "content":"AAAAAAAAAAAAAAAAAAAAAA=="}
+        """;
+
     private const string GoodRequest = """
-        {"fileID":3672856974923286,"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n","metadata":{},
-         "contentType":"image/jpeg","file":{"decryptionHeader":"homebase-v1"},
-         "thumbnail":{"decryptionHeader":"homebase-v1"},
+        {"fileID":3672856974923286,"collectionID":1,"homebase":
+        """ + Sealed + """
+        ,"payloadIv":"AAAAAAAAAAAAAAAAAAAAAA==","contentType":"image/jpeg",
          "thumbnails":[{"pixelWidth":320,"pixelHeight":240,"contentType":"image/webp"}]}
+        """;
+
+    // Ente's own upload request, with Ente's encryption: refused.
+    private const string EnteRequest = """
+        {"fileID":3672856974923286,"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n",
+         "metadata":{"encryptedData":"e","decryptionHeader":"h"},"file":{"decryptionHeader":"ente"},
+         "contentType":"image/jpeg","thumbnails":[]}
+        """;
+
+    // A key header that isn't a zkDrive one (locked with the shared secret, which Odin could open).
+    private const string AesKeyHeaderRequest = """
+        {"fileID":3672856974923286,"collectionID":1,"homebase":{"keyHeader":{"encryptionVersion":1,"type":"aes",
+         "iv":"AAAAAAAAAAAAAAAAAAAAAA==",
+         "encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+         "content":"AAAAAAAAAAAAAAAAAAAAAA=="},"payloadIv":"AAAAAAAAAAAAAAAAAAAAAA==","contentType":"image/jpeg",
+         "thumbnails":[]}
         """;
 
     /// <summary>
     /// The one-request upload is under /api, and refuses, before calling Odin,
-    /// parts out of order or missing, and photos not in Homebase's format.
+    /// parts out of order or missing, and photos not sealed the Homebase way.
     /// </summary>
     [Theory]
     [InlineData(GoodRequest, new[] { "thumbnail", "request", "file" })]
     [InlineData(GoodRequest, new[] { "request", "file", "thumbnail" })]
     [InlineData(GoodRequest, new[] { "request", "thumbnail" })]
-    [InlineData("""{"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n","metadata":{},"file":{"decryptionHeader":"ente"},"thumbnails":[]}""",
-        new[] { "request", "file" })]
+    [InlineData(EnteRequest, new[] { "request", "file" })]
+    [InlineData(AesKeyHeaderRequest, new[] { "request", "file" })]
     public async Task TheUploadIsCheckedBeforeOdin(string requestJson, string[] parts)
     {
         var form = new MultipartFormDataContent();
@@ -115,11 +138,7 @@ public class WebAppTests(WebAppServer proxy) : IClassFixture<WebAppServer>
         {
             Content = form,
         };
-        request.Headers.Add("X-Auth-Token", CredentialsTests.Token(new
-        {
-            v = 1, identity = "frodo.example.test", token = CredentialsTests.Tk, ss = CredentialsTests.Ss,
-            dk = CredentialsTests.Dk,
-        }));
+        request.Headers.Add("X-Auth-Token", CredentialsTests.GoodToken());
         var response = await proxy.Client.SendAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);

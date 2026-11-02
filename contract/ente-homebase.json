@@ -20,19 +20,9 @@
     "photo": {
         "fileType": 7210,
         "payloadKey": "original",
-        "format": "homebase-v1",
-        "keyInfo": "ente-homebase-object"
+        "format": "homebase-v2"
     },
     "testValues": {
-        "enteUserID": { "identity": "frodo.baggins.demo.rocks", "userID": 256750248973160 },
-        "photoKey": {
-            "driveKey": "AAECAwQFBgcICQoLDA0ODw==",
-            "fileID": 3672856974923286,
-            "uniqueId": "01000000-0000-0000-000d-0c71a74d1616",
-            "aesKey": "5ed72441b8e5987d1e55d7364f285758",
-            "iv": "57c5b70fbf97a9e40a3e188ef526d5af",
-            "plaintext": "hello homebase",
-            "ciphertext": "Z9LEPwmA4ChvBtF87CMEzA=="
-        }
+        "enteUserID": { "identity": "frodo.baggins.demo.rocks", "userID": 256750248973160 }
     }
 }
