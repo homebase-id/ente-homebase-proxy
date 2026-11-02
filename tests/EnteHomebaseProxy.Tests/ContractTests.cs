@@ -22,6 +22,31 @@ public class ContractTests
     }
 
     [Fact]
+    public void TheProxyUsesTheContractsPhotoFormat()
+    {
+        var photo = Contract["photo"]!;
+        Assert.Equal(EnteDrive.FileRecordFileType, photo["fileType"]!.GetValue<int>());
+        Assert.Equal(EnteDrive.PhotoPayloadKey, photo["payloadKey"]!.GetValue<string>());
+        Assert.Equal(EnteDrive.PhotoFormat, photo["format"]!.GetValue<string>());
+    }
+
+    /// <summary>The photo key the web app derives (photo.ts) is the proxy's, byte for byte.</summary>
+    [Fact]
+    public void ThePhotoKeyMatchesTheContractsTestValue()
+    {
+        var test = Contract["testValues"]!["photoKey"]!;
+        var driveKey = Convert.FromBase64String(test["driveKey"]!.GetValue<string>());
+        var uid = EnteIds.ToGuid(EnteIds.Kind.File, test["fileID"]!.GetValue<long>());
+        var key = Odin.OdinCrypto.DeriveObjectKey(driveKey, uid);
+
+        Assert.Equal(test["uniqueId"]!.GetValue<string>(), uid.ToString());
+        Assert.Equal(test["aesKey"]!.GetValue<string>(), Convert.ToHexStringLower(key.AesKey));
+        Assert.Equal(test["iv"]!.GetValue<string>(), Convert.ToHexStringLower(key.Iv));
+        Assert.Equal(test["ciphertext"]!.GetValue<string>(), Convert.ToBase64String(Odin.OdinCrypto.AesCbcEncrypt(
+            key.AesKey, key.Iv, System.Text.Encoding.UTF8.GetBytes(test["plaintext"]!.GetValue<string>()))));
+    }
+
+    [Fact]
     public void TheUserIdMatchesTheContractsTestValue()
     {
         var test = Contract["testValues"]!["enteUserID"]!;
@@ -45,7 +70,7 @@ public class ContractTests
     {
         var constants = File.ReadAllText(EnteCheckout.FileOrSkip("web/packages/homebase/constants.ts"));
         var missing = new List<string>();
-        foreach (var section in new[] { "app", "drive", "passwordFile", "keyAttributesFile" })
+        foreach (var section in new[] { "app", "drive", "passwordFile", "keyAttributesFile", "photo" })
         {
             foreach (var (key, value) in Contract[section]!.AsObject())
             {

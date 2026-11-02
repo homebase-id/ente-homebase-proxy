@@ -86,19 +86,29 @@ public class WebAppTests(WebAppServer proxy) : IClassFixture<WebAppServer>
         Assert.Equal(HttpStatusCode.Unauthorized, noToken.StatusCode);
     }
 
-    /// <summary>The one-request upload is under /api, and refuses parts out of order before calling Odin.</summary>
+    private const string GoodRequest = """
+        {"fileID":3672856974923286,"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n","metadata":{},
+         "contentType":"image/jpeg","file":{"decryptionHeader":"homebase-v1"},
+         "thumbnail":{"decryptionHeader":"homebase-v1"},
+         "thumbnails":[{"pixelWidth":320,"pixelHeight":240,"contentType":"image/webp"}]}
+        """;
+
+    /// <summary>
+    /// The one-request upload is under /api, and refuses, before calling Odin,
+    /// parts out of order or missing, and photos not in Homebase's format.
+    /// </summary>
     [Theory]
-    [InlineData("thumbnail", "request", "file")]
-    [InlineData("request", "file", "thumbnail")]
-    [InlineData("request", "thumbnail")]
-    public async Task TheUploadNeedsRequestThenThumbnailThenFile(params string[] parts)
+    [InlineData(GoodRequest, new[] { "thumbnail", "request", "file" })]
+    [InlineData(GoodRequest, new[] { "request", "file", "thumbnail" })]
+    [InlineData(GoodRequest, new[] { "request", "thumbnail" })]
+    [InlineData("""{"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n","metadata":{},"file":{"decryptionHeader":"ente"},"thumbnails":[]}""",
+        new[] { "request", "file" })]
+    public async Task TheUploadIsCheckedBeforeOdin(string requestJson, string[] parts)
     {
         var form = new MultipartFormDataContent();
         foreach (var part in parts)
         {
-            form.Add(part == "request"
-                ? new StringContent("""{"collectionID":1,"encryptedKey":"k","keyDecryptionNonce":"n","metadata":{},"file":{"decryptionHeader":"h"},"thumbnail":{"decryptionHeader":"h"}}""")
-                : new ByteArrayContent([1, 2, 3]), part, part);
+            form.Add(part == "request" ? new StringContent(requestJson) : new ByteArrayContent([1, 2, 3]), part, part);
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"/api{Handlers.FilesHandlers.UploadPath}")

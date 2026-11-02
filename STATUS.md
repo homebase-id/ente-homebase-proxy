@@ -45,9 +45,10 @@ The test photo (a 320×240 checkerboard) is still in your Ente library on frodo.
 | `POST /collections`, `GET /collections/{id}` | 1 | An album: Ente's collection (client-encrypted) as content |
 | `GET /collections/v2` | 1 | Every album; each album's updationTime is *now* (see below) |
 | `GET /collections/v2/diff` | 2 | The album's memberships, then their photo records |
-| `POST /homebase/files` | 2 | A photo in one request (decision 2): one Homebase file, then its membership; up to 1 GiB, streamed |
-| `GET /files/preview/{id}` | 1 | The thumbnail of the photo's payload |
-| `GET /files/download/{id}` | 1 | The photo's payload |
+| `POST /homebase/files` | 2 | A photo in one request (decision 2): one Homebase file, then its membership; up to 1 GiB, streamed; bytes stored as sent |
+| `GET /homebase/files/{id}/thumb?width&height` | 1 | The thumbnail covering that size, as stored (the web app decrypts it) |
+| `GET /homebase/files/{id}/original` | 1 | The original, as stored, streamed (the web app decrypts it) |
+| `GET /files/preview/{id}`, `GET /files/download/{id}` | 1–3 | Only for photos from before the web app encrypted in Homebase's format (below) |
 | `GET`/`POST /user-entity/key` | 1 | The key for one type of people/places data |
 | `/remote-store/feature-flags`, `/contacts/diff`, `/trash/v2/diff`, `/user-entity/entity/diff`, `/collection-actions/pending-remove` | 0 | Empty: nothing of that kind can exist yet |
 
@@ -65,16 +66,26 @@ the real key attributes file exists.
   instead every pull syncs every album (each sync returns only changes). The sync looks 10
   minutes back from sinceTime, since the client may store the proxy's clock while changes carry
   Odin's; repeats are harmless.
-- **Photo keys are derived** (`OdinCrypto.DeriveObjectKey`: HKDF of the drive key and the
-  photo's uniqueId). Odin doesn't send a zero-knowledge file's key with its payload, so
-  otherwise every byte read would need its header first. The key is also locked in the file's
-  key header, so other Homebase clients read them normally.
-- **The thumbnail is filed as 720×720.** It's Ente's ciphertext, so its real size is unknown;
-  Ente makes them at most 720 px. Other Homebase apps can't show it (nor the original): both
-  are encrypted with Ente's keys inside Homebase's.
-- **Photos uploaded before the 2026-10-30 change** kept the original and thumbnail as two separate object
-  files (7204). They still read: when the photo file has no payload, the proxy falls back to
-  the objects (two more calls). Remove the fallback once those photos are re-uploaded.
+- **One layer of encryption on the media: Homebase's, applied in the browser.** The proxy
+  never sees a photo in the clear: it stores and returns the bytes as the web app sent them.
+  Ente's encryption stays only on its small record of each photo (dates, captions, the key that
+  opens them), which Ente's sync needs. Other Homebase apps that can read the drive open the
+  original and thumbnails like any other Homebase file.
+- **Photo keys are derived** (`OdinCrypto.DeriveObjectKey`, and `photo.ts` `photoKey` in the
+  web app: HKDF of the drive key and the photo's uniqueId). The web app needs no header to
+  read a photo, and picks the photo's ID so it can derive the key before uploading. The key is
+  also locked in the file's key header, so other Homebase apps open the file normally.
+  `contract/ente-homebase.json` has a test value both sides check.
+- **The inline preview isn't encrypted.** Homebase keeps every file's tiny `previewThumbnail`
+  (20 px, under 1 KB) in its metadata as is, for every app (odin-js `encryptMetaData`
+  encrypts only the content); Ente's photos now have one too.
+- **Big videos are encrypted in browser memory.** WebCrypto's AES-CBC doesn't stream, so the
+  web app holds the whole file and its ciphertext at once (up to the 1 GiB limit).
+- **Photos from before the web app encrypted in Homebase's format** still read, through the
+  Ente routes, which open Homebase's layer to hand Ente its own ciphertext:
+  - before 2026-10-30's changes: the original and thumbnail as two object files (7204);
+  - on 2026-10-30: one file with Ente's ciphertext as the `entefile` payload.
+  Remove those paths once such photos are re-uploaded or deleted.
 - **No paging yet**: an album sync reads at most 1000 memberships, the album list 1000 albums.
 - **Security (prototype)**: the web app keeps the X-Auth-Token, which holds the drive key, where
   Ente keeps its auth token (localStorage and IndexedDB, unencrypted).
@@ -124,17 +135,20 @@ Built for milestones A and B (the routes above); the rest of the TODOs follow th
    listing. A soft-deleted Odin file loses its uniqueId, so the photo and album IDs also go
    in tags.
 
-2. **A photo is one Homebase file, Homebase's way** (changed 2026-10-30, from separate
-   object files, after chat-kmp's model): the record as content, the original as the payload
-   (`entefile`), and Ente's thumbnail as **that payload's thumbnail**, sent with it.
-   - Client change, Homebase mode only: instead of Ente's upload URLs, byte `PUT`s and
-     `POST /files`, one multipart `POST /homebase/files` with the record, thumbnail and
-     original (`upload-service.ts` `uploadToHomebase`, `remote.ts` `postHomebaseEnteFile`).
-     The proxy streams the original through; the photo's ID is a new number.
+2. **A photo is one Homebase file, the Homebase pattern** (2026-11-02; chat-kmp's model).
+   The web app encrypts the media in Homebase's format, as every Homebase client does, instead
+   of Ente's: the original is the payload (`original`, with its real content type), with
+   WebP thumbnails at 320/640/1080/1600 px (never above the source) and a 20 px inline preview,
+   made from the image itself (or, for videos, live photos and HEIC, from Ente's thumbnail).
+   Ente's record of the photo, still Ente-encrypted, is the file's content; its file and
+   thumbnail `decryptionHeader` say `homebase-v1` so Ente knows the bytes have no Ente
+   encryption.
+   - Client, Homebase mode only: one multipart `POST /homebase/files` with the record, the
+     thumbnails and the original (`upload-service.ts` `uploadToHomebase`, `remote.ts`
+     `postHomebaseEnteFile`), instead of Ente's upload URLs, byte `PUT`s and `POST /files`.
+     Reads: `download-core.ts` `downloadHomebasePhoto`.
    - Upload: 2 calls (the photo, its membership). Thumbnail: 1 call. Original: 1 call.
    - Downloads send X-Auth-Token (`web/packages/base/file-download.ts`).
-   - Not yet: Homebase's tiny inline `previewThumbnail` and its WebP size ladder. The proxy
-     only sees Ente's ciphertext, so the web app would have to make them.
 
 3. **No credentials in URLs, ever.** The X-Auth-Token holds the drive key, which can't be
    revoked. So no presigned-style URLs and no `?token=`: credentials only in the header.

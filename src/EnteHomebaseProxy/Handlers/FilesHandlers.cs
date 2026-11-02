@@ -10,11 +10,12 @@ namespace EnteHomebaseProxy.Handlers;
 /// Ente's /files routes (server/cmd/museum/main.go), except sharing (see
 /// <see cref="SharingHandlers"/>) and trash (see <see cref="TrashHandlers"/>).
 ///
-/// A photo is one Homebase file, Homebase's way (STATUS.md, decision 2): Ente's
-/// record as content, the original as the payload, and Ente's thumbnail as
-/// that payload's thumbnail. In Homebase mode the web app uploads all three in
-/// one request (<see cref="UploadPath"/>) instead of Ente's upload URLs and
-/// POST /files. A thumbnail or an original then downloads in one Odin call.
+/// A photo is one Homebase file, the Homebase pattern (STATUS.md, decision 2):
+/// the web app encrypts the original and its thumbnails in Homebase's format
+/// (no Ente encryption on them) and uploads them with Ente's record in one
+/// request (<see cref="UploadPath"/>), instead of Ente's upload URLs and POST
+/// /files. The proxy stores and returns those bytes as they are: it never
+/// encrypts or decrypts them. Each read is one Odin call.
 /// </summary>
 public static class FilesHandlers
 {
@@ -24,8 +25,11 @@ public static class FilesHandlers
     /// <summary>The largest original accepted (one request, no multipart).</summary>
     private const long MaxUploadBytes = 1L << 30; // 1 GiB
 
-    /// <summary>Ente's thumbnails are at most 100 KB; this leaves room.</summary>
+    /// <summary>Homebase's largest thumbnail (1600 px) is capped at 640 KB; this leaves room.</summary>
     private const int MaxThumbnailBytes = 1 << 20; // 1 MiB
+
+    /// <summary>Homebase's thumbnail ladder (chat-kmp's baseThumbSizes) is at most 4, plus one at source size.</summary>
+    private const int MaxThumbnails = 6;
 
     private const int MaxRequestJsonBytes = 64 << 10; // 64 KiB
 
@@ -37,6 +41,8 @@ public static class FilesHandlers
     {
         app.MapPost(UploadPath, Upload)
             .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxUploadBytes + (2 << 20)));
+        app.MapGet(UploadPath + "/{fileID:long}/thumb", GetPhotoThumbnail);
+        app.MapGet(UploadPath + "/{fileID:long}/original", GetPhotoOriginal);
         app.MapGet("/files/preview/{fileID:long}", GetThumbnail);
         app.MapGet("/files/download/{fileID:long}", GetFile);
 
@@ -94,11 +100,19 @@ public static class FilesHandlers
 
     /// <summary>
     /// POST /homebase/files: a new photo in an album, in one multipart request
-    /// whose parts come in this order: "request" (Ente's POST /files body,
-    /// without objectKeys), "thumbnail" (Ente's encrypted thumbnail), "file"
-    /// (Ente's encrypted original, streamed through to Odin, never buffered).
+    /// whose parts come in this order: "request" (JSON, below), one "thumbnail"
+    /// per entry of request.thumbnails, then "file" (streamed through to Odin,
+    /// never buffered). The web app encrypted the thumbnails and the file in
+    /// Homebase's format, with the photo's key (<see cref="OdinCrypto.DeriveObjectKey"/>
+    /// of request.fileID, which it picks); they're stored as sent.
+    ///
+    /// request: Ente's POST /files body without objectKeys (collectionID,
+    /// encryptedKey, keyDecryptionNonce, metadata, pubMagicMetadata, file and
+    /// thumbnail with decryptionHeader "homebase-v1"), plus fileID,
+    /// contentType, previewThumbnail {pixelWidth, pixelHeight, contentType,
+    /// content}, and thumbnails [{pixelWidth, pixelHeight, contentType}].
+    ///
     /// Two Odin calls (decision 4): the photo, then its membership in the album.
-    /// The proxy picks the photo's ID.
     /// </summary>
     private static async Task<IResult> Upload(HttpContext context, OdinClient odin, CancellationToken ct)
     {
@@ -129,46 +143,44 @@ public static class FilesHandlers
             return EnteResults.Status(400);
         }
 
-        section = await reader.ReadNextSectionAsync(ct);
-        if (Name(section) != "thumbnail" ||
-            await ReadAtMost(section!.Body, MaxThumbnailBytes, ct) is not { Length: > 0 } thumbnail)
+        if (ReadUpload(body) is not { } upload) return EnteResults.Status(400);
+
+        var thumbnails = new List<OdinThumbnail>();
+        foreach (var (width, height, contentType) in upload.Thumbnails)
         {
-            return EnteResults.Status(400);
+            section = await reader.ReadNextSectionAsync(ct);
+            if (Name(section) != "thumbnail" ||
+                await ReadAtMost(section!.Body, MaxThumbnailBytes, ct) is not { Length: > 0 } bytes)
+            {
+                return EnteResults.Status(400);
+            }
+
+            thumbnails.Add(new OdinThumbnail(bytes, width, height, contentType));
         }
 
         section = await reader.ReadNextSectionAsync(ct);
         if (Name(section) != "file") return EnteResults.Status(400);
 
-        var collectionID = body["collectionID"]?.GetValueKind() == JsonValueKind.Number
-            ? body["collectionID"]!.GetValue<long>()
-            : 0;
-        if (collectionID is <= 0 or > EnteIds.MaxSafeInteger ||
-            body["file"]?["decryptionHeader"] is null || body["thumbnail"]?["decryptionHeader"] is null ||
-            body["encryptedKey"] is null || body["keyDecryptionNonce"] is null || body["metadata"] is null)
-        {
-            return EnteResults.Status(400);
-        }
-
-        var fileID = EnteIds.NewId();
+        var fileID = upload.FileID;
         var record = new JsonObject
         {
             ["id"] = fileID,
             ["ownerID"] = EnteIds.UserId(credentials.Identity),
             ["file"] = new JsonObject
             {
-                ["decryptionHeader"] = body["file"]!["decryptionHeader"]!.DeepClone(),
+                ["decryptionHeader"] = EnteDrive.PhotoFormat,
                 ["size"] = body["file"]?["size"]?.DeepClone(),
             },
             ["thumbnail"] = new JsonObject
             {
-                ["decryptionHeader"] = body["thumbnail"]!["decryptionHeader"]!.DeepClone(),
-                ["size"] = thumbnail.Length,
+                ["decryptionHeader"] = EnteDrive.PhotoFormat,
+                ["size"] = thumbnails.Sum(t => t.Bytes.Length),
             },
             ["metadata"] = body["metadata"]!.DeepClone(),
             ["info"] = new JsonObject
             {
                 ["fileSize"] = body["file"]?["size"]?.DeepClone(),
-                ["thumbSize"] = thumbnail.Length,
+                ["thumbSize"] = thumbnails.Sum(t => t.Bytes.Length),
             },
         };
         if (body["pubMagicMetadata"] is { } pub) record["pubMagicMetadata"] = pub.DeepClone();
@@ -176,33 +188,31 @@ public static class FilesHandlers
 
         var membership = new JsonObject
         {
-            ["collectionID"] = collectionID,
+            ["collectionID"] = upload.CollectionID,
             ["encryptedKey"] = body["encryptedKey"]!.DeepClone(),
             ["keyDecryptionNonce"] = body["keyDecryptionNonce"]!.DeepClone(),
         };
 
         var fileGuid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
-        var collectionGuid = EnteIds.ToGuid(EnteIds.Kind.Collection, collectionID);
+        var collectionGuid = EnteIds.ToGuid(EnteIds.Kind.Collection, upload.CollectionID);
 
         var photoResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
             new NewOdinFile(fileGuid, EnteDrive.FileRecordFileType, record.ToJsonString())
             {
                 Tags = [fileGuid],
                 FileKey = OdinCrypto.DeriveObjectKey(credentials.DriveKey, fileGuid),
-                Payload = new OdinPayload(EnteDrive.PhotoPayloadKey, section!.Body, EnteDrive.EnteCiphertextType)
+                Payload = new OdinPayload(EnteDrive.PhotoPayloadKey, section!.Body, upload.ContentType)
                 {
-                    Thumbnails =
-                    [
-                        new OdinThumbnail(thumbnail, EnteDrive.ThumbnailPixels, EnteDrive.ThumbnailPixels,
-                            EnteDrive.EnteCiphertextType),
-                    ],
+                    Encrypted = true,
+                    Thumbnails = thumbnails,
+                    PreviewThumbnail = upload.PreviewThumbnail,
                 },
             }, ct);
         if (photoResponse.IsExistingUniqueId) return EnteResults.Status(409);
         if (!photoResponse.IsSuccess) return EnteResults.OdinFailure(photoResponse);
 
         var membershipResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(EnteIds.MembershipGuid(collectionID, fileID), EnteDrive.MembershipFileType,
+            new NewOdinFile(EnteIds.MembershipGuid(upload.CollectionID, fileID), EnteDrive.MembershipFileType,
                 membership.ToJsonString())
             {
                 GroupId = collectionGuid,
@@ -211,6 +221,71 @@ public static class FilesHandlers
         if (!membershipResponse.IsSuccess) return EnteResults.OdinFailure(membershipResponse);
 
         return Results.Json(EnteRecords.File(record, membership, EnteRecords.NowMicros()));
+    }
+
+    private sealed record UploadRequest(
+        long FileID,
+        long CollectionID,
+        string ContentType,
+        IReadOnlyList<(int Width, int Height, string ContentType)> Thumbnails,
+        OdinPreviewThumbnail? PreviewThumbnail);
+
+    private static long? Long(JsonNode? node) =>
+        node?.GetValueKind() == JsonValueKind.Number && node.AsValue().TryGetValue<long>(out var n) ? n : null;
+
+    private static int? Pixels(JsonNode? node) =>
+        Long(node) is { } n and > 0 and <= 16384 ? (int)n : null;
+
+    private static string? Text(JsonNode? node, int maxLength) =>
+        node?.GetValueKind() == JsonValueKind.String && node.GetValue<string>() is { Length: > 0 } text &&
+        text.Length <= maxLength
+            ? text
+            : null;
+
+    /// <summary>The request part, checked; null if anything is missing or out of range.</summary>
+    private static UploadRequest? ReadUpload(JsonObject body)
+    {
+        if (Long(body["fileID"]) is not { } fileID || fileID is <= 0 or > EnteIds.MaxSafeInteger) return null;
+        if (Long(body["collectionID"]) is not { } collectionID || collectionID is <= 0 or > EnteIds.MaxSafeInteger)
+        {
+            return null;
+        }
+
+        if (body["file"]?["decryptionHeader"]?.ToString() != EnteDrive.PhotoFormat ||
+            body["encryptedKey"] is null || body["keyDecryptionNonce"] is null || body["metadata"] is null ||
+            Text(body["contentType"], 255) is not { } contentType ||
+            body["thumbnails"] is not JsonArray thumbnailsJson || thumbnailsJson.Count > MaxThumbnails)
+        {
+            return null;
+        }
+
+        var thumbnails = new List<(int, int, string)>();
+        foreach (var t in thumbnailsJson)
+        {
+            if (Pixels(t?["pixelWidth"]) is not { } w || Pixels(t?["pixelHeight"]) is not { } h ||
+                Text(t?["contentType"], 255) is not { } type)
+            {
+                return null;
+            }
+
+            // Odin keys a payload's thumbnails by width, and wants each size once.
+            if (thumbnails.Any(x => x.Item1 == w)) return null;
+            thumbnails.Add((w, h, type));
+        }
+
+        OdinPreviewThumbnail? preview = null;
+        if (body["previewThumbnail"] is JsonObject p)
+        {
+            if (Pixels(p["pixelWidth"]) is not { } w || Pixels(p["pixelHeight"]) is not { } h ||
+                Text(p["contentType"], 255) is not { } type || Text(p["content"], 2048) is not { } content)
+            {
+                return null;
+            }
+
+            preview = new OdinPreviewThumbnail(w, h, type, content);
+        }
+
+        return new UploadRequest(fileID, collectionID, contentType, thumbnails, preview);
     }
 
     /// <summary>A multipart section's form name, or null.</summary>
@@ -234,7 +309,57 @@ public static class FilesHandlers
         return buffer.ToArray();
     }
 
-    /// <summary>Bytes Odin returned, opened with the photo's derived key: Ente's ciphertext.</summary>
+    /// <summary>
+    /// Passes Odin's answer through: the bytes as stored (Homebase-encrypted by
+    /// the web app), streamed, with their content type; Odin's status if it failed.
+    /// </summary>
+    private static async Task<IResult> PassThrough(HttpContext context, OdinClient odin,
+        Auth.HomebaseCredentials credentials, string path, CancellationToken ct)
+    {
+        var response = await odin.GetRawAsync(credentials, EnteDrive.Alias, path, ct);
+        context.Response.RegisterForDispose(response);
+        if ((int)response.StatusCode == 404) return EnteResults.Status(404);
+        if (!response.IsSuccessStatusCode)
+        {
+            return EnteResults.OdinFailure(new OdinResponse((int)response.StatusCode, null, null));
+        }
+
+        return Results.Stream(await response.Content.ReadAsStreamAsync(ct),
+            response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream");
+    }
+
+    /// <summary>
+    /// GET /homebase/files/{fileID}/thumb?width&amp;height: the photo's thumbnail
+    /// nearest that size, as stored (the web app decrypts it). One Odin call.
+    /// </summary>
+    private static async Task<IResult> GetPhotoThumbnail(long fileID, int? width, int? height,
+        HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (fileID is <= 0 or > EnteIds.MaxSafeInteger) return EnteResults.Status(404);
+        var w = Math.Clamp(width ?? 640, 1, 16384);
+        var h = Math.Clamp(height ?? w, 1, 16384);
+        var uid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
+        return await PassThrough(context, odin, credentials,
+            $"by-uid/{uid:D}/payload/{EnteDrive.PhotoPayloadKey}/thumb?width={w}&height={h}&directMatchOnly=false",
+            ct);
+    }
+
+    /// <summary>
+    /// GET /homebase/files/{fileID}/original: the photo's original, as stored
+    /// (the web app decrypts it), streamed. One Odin call.
+    /// </summary>
+    private static async Task<IResult> GetPhotoOriginal(long fileID, HttpContext context, OdinClient odin,
+        CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (fileID is <= 0 or > EnteIds.MaxSafeInteger) return EnteResults.Status(404);
+        var uid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
+        return await PassThrough(context, odin, credentials,
+            $"by-uid/{uid:D}/payload/{EnteDrive.PhotoPayloadKey}", ct);
+    }
+
+    /// <summary>Bytes Odin returned for a photo stored with Ente's encryption, opened with its derived key.</summary>
     private static IResult Opened(Auth.HomebaseCredentials credentials, Guid uid, byte[] bytes)
     {
         var key = OdinCrypto.DeriveObjectKey(credentials.DriveKey, uid);
@@ -242,10 +367,10 @@ public static class FilesHandlers
     }
 
     /// <summary>
-    /// GET /files/preview/{fileID}: the thumbnail's bytes (Ente's ciphertext).
-    /// One Odin call: the photo's payload's thumbnail. Photos uploaded before
-    /// thumbnails moved onto the payload have none, and are read from their
-    /// object file instead (a second call, only for those).
+    /// GET /files/preview/{fileID}: the thumbnail of a photo stored with Ente's
+    /// encryption (Ente's ciphertext). Photos the web app encrypts in Homebase's
+    /// format are read from GET /homebase/files/{fileID}/thumb instead. One Odin
+    /// call for photos from 2026-10-30; the oldest, kept as object files, take two.
     /// </summary>
     private static async Task<IResult> GetThumbnail(long fileID, HttpContext context, OdinClient odin,
         CancellationToken ct)
@@ -255,18 +380,19 @@ public static class FilesHandlers
 
         var uid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
         var (status, bytes) = await odin.GetThumbnailByUniqueIdAsync(credentials, EnteDrive.Alias, uid,
-            EnteDrive.PhotoPayloadKey, EnteDrive.ThumbnailPixels, EnteDrive.ThumbnailPixels, ct);
+            EnteDrive.EnteCiphertextPayloadKey, EnteDrive.EnteCiphertextThumbnailPixels,
+            EnteDrive.EnteCiphertextThumbnailPixels, ct);
         if (bytes is not null) return Opened(credentials, uid, bytes);
         if (status != 404) return EnteResults.OdinFailure(new OdinResponse(status, null, null));
 
-        // Uploaded before the 2026-10-30 change: the photo's ID is its thumbnail's object number.
+        // Kept as object files: the photo's ID is its thumbnail's object number.
         return await LegacyObjectBytes(odin, credentials, fileID, ct);
     }
 
     /// <summary>
-    /// GET /files/download/{fileID}: the original's bytes (Ente's ciphertext).
-    /// One Odin call: the photo's payload. Photos uploaded before the 2026-10-30 change
-    /// take two more: the record, for its object, then the object.
+    /// GET /files/download/{fileID}: the original of a photo stored with Ente's
+    /// encryption (Ente's ciphertext). Photos the web app encrypts in Homebase's
+    /// format are read from GET /homebase/files/{fileID}/original instead.
     /// </summary>
     private static async Task<IResult> GetFile(long fileID, HttpContext context, OdinClient odin,
         CancellationToken ct)
@@ -276,7 +402,7 @@ public static class FilesHandlers
 
         var uid = EnteIds.ToGuid(EnteIds.Kind.File, fileID);
         var (status, bytes) = await odin.GetPayloadByUniqueIdAsync(credentials, EnteDrive.Alias, uid,
-            EnteDrive.PhotoPayloadKey, ct);
+            EnteDrive.EnteCiphertextPayloadKey, ct);
         if (bytes is not null) return Opened(credentials, uid, bytes);
         if (status != 404) return EnteResults.OdinFailure(new OdinResponse(status, null, null));
 
@@ -297,7 +423,7 @@ public static class FilesHandlers
             ? n
             : null;
 
-    /// <summary>An object file's bytes (how photos were stored before the 2026-10-30 change).</summary>
+    /// <summary>An object file's bytes (how the first photos, before 2026-10-30's changes, were stored).</summary>
     private static async Task<IResult> LegacyObjectBytes(OdinClient odin, Auth.HomebaseCredentials credentials,
         long objectNumber, CancellationToken ct)
     {
