@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json.Nodes;
 using EnteHomebaseProxy.Odin;
 
@@ -24,17 +23,18 @@ public class CryptoVectorTests
         Assert.Equal(B(v["plain"]), OdinCrypto.AesCbcDecrypt(B(v["key"]), B(v["iv"]), B(v["cipher"])));
     }
 
+    /// <summary>The web app's key header (the vector's) is what the proxy takes as sealed.</summary>
     [Fact]
-    public void KeyHeaderMatchesTheVector()
+    public void TheVectorsKeyHeaderIsASealedRecordsKeyHeader()
     {
         var v = Vectors["keyHeader"]!;
-        var fileKey = new OdinCrypto.FileKey(B(v["aesKey"]), B(v["iv"]));
-        var header = OdinCrypto.LockFileKey(fileKey, B(v["driveKey"]));
-        Assert.True(JsonNode.DeepEquals(v["header"], header), header.ToJsonString());
-
-        var opened = OdinCrypto.OpenFileKey(v["header"]!, B(v["driveKey"]));
-        Assert.Equal(fileKey.AesKey, opened.AesKey);
-        Assert.Equal(fileKey.Iv, opened.Iv);
+        var sealedRecord = SealedRecord.Read(new JsonObject
+        {
+            ["keyHeader"] = v["header"]!.DeepClone(),
+            ["content"] = Convert.ToBase64String(new byte[32]),
+        });
+        Assert.NotNull(sealedRecord);
+        Assert.True(JsonNode.DeepEquals(v["header"], sealedRecord.KeyHeader), sealedRecord.KeyHeader.ToJsonString());
     }
 
     [Fact]
@@ -56,24 +56,43 @@ public class CryptoVectorTests
         Assert.Equal(7, OdinCrypto.ReadResponseJson(secret, """{"n":7}""")!["n"]!.GetValue<int>());
     }
 
+    /// <summary>Odin's file headers give the type of a zkDrive key header as a name or a number.</summary>
     [Fact]
-    public void FileContentRoundTripsThroughTheKeyHeader()
+    public void ASealedRecordIsReadFromAnOdinHeader()
     {
-        var driveKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
-        var fileKey = OdinCrypto.FileKey.New();
-        const string content = """{"kekSalt":"abc"}""";
+        var v = Vectors["keyHeader"]!;
+        var keyHeader = (JsonObject)v["header"]!.DeepClone();
+        keyHeader["type"] = 13;
+        var content = Convert.ToBase64String(new byte[48]);
         var header = new JsonObject
         {
-            ["sharedSecretEncryptedKeyHeader"] = OdinCrypto.LockFileKey(fileKey, driveKey),
-            ["fileMetadata"] = new JsonObject
-            {
-                ["appData"] = new JsonObject
-                {
-                    ["content"] = Convert.ToBase64String(
-                        OdinCrypto.AesCbcEncrypt(fileKey.AesKey, fileKey.Iv, Encoding.UTF8.GetBytes(content))),
-                },
-            },
+            ["sharedSecretEncryptedKeyHeader"] = keyHeader,
+            ["fileMetadata"] = new JsonObject { ["appData"] = new JsonObject { ["content"] = content } },
         };
-        Assert.Equal(content, OdinClient.DecryptContent(header, driveKey));
+
+        var sealedRecord = SealedRecord.FromHeader(header);
+        Assert.NotNull(sealedRecord);
+        Assert.Equal("zkDrive", sealedRecord.KeyHeader["type"]!.GetValue<string>());
+        Assert.Equal(content, sealedRecord.Content);
     }
+
+    public static TheoryData<string> NotSealed => new()
+    {
+        "null",
+        """{"keyHeader":{"encryptionVersion":1,"type":"aes","iv":"AAAAAAAAAAAAAAAAAAAAAA==","encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"content":"AAAAAAAAAAAAAAAAAAAAAA=="}""",
+        """{"keyHeader":{"encryptionVersion":1,"type":13,"iv":"AAAAAAAAAAAAAAAAAAAAAA==","encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"content":"AAAAAAAAAAAAAAAAAAAAAA=="}""",
+        """{"keyHeader":{"encryptionVersion":1,"type":"zkDrive","iv":"AAAA","encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"content":"AAAAAAAAAAAAAAAAAAAAAA=="}""",
+        """{"keyHeader":{"encryptionVersion":1,"type":"zkDrive","iv":"AAAAAAAAAAAAAAAAAAAAAA==","encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"content":"AAAA"}""",
+        """{"keyHeader":{"encryptionVersion":1,"type":"zkDrive","iv":"AAAAAAAAAAAAAAAAAAAAAA==","encryptedAesKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},"content":"{\"name\":\"plain\"}"}""",
+    };
+
+    /// <summary>
+    /// The proxy won't store anything the web app didn't seal with the drive key:
+    /// an "aes" key header (the shared secret, which Odin can open), a bad size,
+    /// or plain content.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(NotSealed))]
+    public void OnlyRecordsSealedWithTheDriveKeyAreTaken(string json) =>
+        Assert.Null(SealedRecord.Read(JsonNode.Parse(json)));
 }

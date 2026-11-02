@@ -17,6 +17,11 @@
     },
     "passwordFile": { "uniqueId": "c7a886cd-326a-41db-9922-e92828ed02ec", "fileType": 7200 },
     "keyAttributesFile": { "uniqueId": "d269c173-71a3-4fe4-8ee4-8d4da5c929e7", "fileType": 7201 },
+    "photo": {
+        "fileType": 7210,
+        "payloadKey": "original",
+        "format": "homebase-v2"
+    },
     "testValues": {
         "enteUserID": { "identity": "frodo.baggins.demo.rocks", "userID": 256750248973160 }
     }

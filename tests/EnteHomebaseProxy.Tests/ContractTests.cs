@@ -22,6 +22,15 @@ public class ContractTests
     }
 
     [Fact]
+    public void TheProxyUsesTheContractsPhotoFormat()
+    {
+        var photo = Contract["photo"]!;
+        Assert.Equal(EnteDrive.FileRecordFileType, photo["fileType"]!.GetValue<int>());
+        Assert.Equal(EnteDrive.PhotoPayloadKey, photo["payloadKey"]!.GetValue<string>());
+        Assert.Equal(EnteDrive.PhotoFormat, photo["format"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void TheUserIdMatchesTheContractsTestValue()
     {
         var test = Contract["testValues"]!["enteUserID"]!;
@@ -33,8 +42,7 @@ public class ContractTests
     {
         int[] proxys =
         [
-            EnteDrive.CollectionFileType, EnteDrive.ObjectFileType, EnteDrive.UserEntityKeyFileType,
-            EnteDrive.FileRecordFileType, EnteDrive.MembershipFileType,
+            EnteDrive.CollectionFileType, EnteDrive.FileRecordFileType, EnteDrive.MembershipFileType,
         ];
         Assert.DoesNotContain(Contract["passwordFile"]!["fileType"]!.GetValue<int>(), proxys);
     }
@@ -45,7 +53,7 @@ public class ContractTests
     {
         var constants = File.ReadAllText(EnteCheckout.FileOrSkip("web/packages/homebase/constants.ts"));
         var missing = new List<string>();
-        foreach (var section in new[] { "app", "drive", "passwordFile", "keyAttributesFile" })
+        foreach (var section in new[] { "app", "drive", "passwordFile", "keyAttributesFile", "photo" })
         {
             foreach (var (key, value) in Contract[section]!.AsObject())
             {

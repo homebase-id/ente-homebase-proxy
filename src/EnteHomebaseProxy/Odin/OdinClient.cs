@@ -26,22 +26,41 @@ public sealed record OdinThumbnail(byte[] Bytes, int PixelWidth, int PixelHeight
     public string Key(string payloadKey) => payloadKey + PixelWidth;
 }
 
-/// <summary>One payload: its bytes (read once, encrypted on the way to Odin) and its thumbnails.</summary>
-public sealed record OdinPayload(string Key, Stream Bytes, string ContentType)
+/// <summary>Homebase's tiny inline preview (odin-js EmbeddedThumb): stored as is, in the file's metadata.</summary>
+public sealed record OdinPreviewThumbnail(int PixelWidth, int PixelHeight, string ContentType, string Content)
 {
-    public IReadOnlyList<OdinThumbnail> Thumbnails { get; init; } = [];
+    public JsonObject ToJson() => new()
+    {
+        ["pixelWidth"] = PixelWidth,
+        ["pixelHeight"] = PixelHeight,
+        ["contentType"] = ContentType,
+        ["content"] = Content,
+    };
 }
 
-/// <summary>A new zkDrive file: its appData, encrypted content, and at most one payload.</summary>
-public sealed record NewOdinFile(Guid UniqueId, int FileType, string? Content)
+/// <summary>
+/// One payload with its thumbnails, already encrypted by the web app the
+/// Homebase way: the file's key with this payload's own IV, which its
+/// thumbnails share. Sent as given and streamed, never buffered.
+/// </summary>
+public sealed record OdinPayload(string Key, Stream Bytes, string ContentType, byte[] Iv)
+{
+    public IReadOnlyList<OdinThumbnail> Thumbnails { get; init; } = [];
+    public OdinPreviewThumbnail? PreviewThumbnail { get; init; }
+}
+
+/// <summary>
+/// A new file on Ente's drive. With <see cref="Sealed"/> it's encrypted, by
+/// the web app: Odin stores its key header and content as given. Without
+/// it, the file is unencrypted and has no content. That's only for files
+/// whose appData (uniqueId, groupId, tags) is all they hold.
+/// </summary>
+public sealed record NewOdinFile(Guid UniqueId, int FileType, SealedRecord? Sealed)
 {
     public Guid? GroupId { get; init; }
     public IReadOnlyList<Guid>? Tags { get; init; }
 
-    /// <summary>The file key; a fresh random one unless the caller needs to know it (photos).</summary>
-    public OdinCrypto.FileKey? FileKey { get; init; }
-
-    /// <summary>One payload, encrypted with the file key and its IV (bytes as given: Ente's ciphertext).</summary>
+    /// <summary>At most one payload, which needs <see cref="Sealed"/> (its key).</summary>
     public OdinPayload? Payload { get; init; }
 }
 
@@ -90,15 +109,21 @@ public sealed class OdinClient(HttpClient http)
     }
 
     /// <summary>
-    /// POST /api/v2/drives/{alias}/files: a new zkDrive file. Its content and
-    /// payload are encrypted with its file key, which is locked with the drive
-    /// key. Odin refuses it (see <see cref="OdinResponse.IsExistingUniqueId"/>)
-    /// if a file with this uniqueId exists; it never overwrites.
+    /// POST /api/v2/drives/{alias}/files: a new file. Its key header, content
+    /// and payload are sent as the web app sealed them (see <see cref="NewOdinFile"/>);
+    /// only the upload's own metadata is encrypted here, with the shared
+    /// secret, as Odin's transport requires. Odin refuses it (see
+    /// <see cref="OdinResponse.IsExistingUniqueId"/>) if a file with this
+    /// uniqueId exists; it never overwrites.
     /// </summary>
     public Task<OdinResponse> CreateFileAsync(HomebaseCredentials credentials, string driveAlias, NewOdinFile file,
         CancellationToken ct)
     {
-        var fileKey = file.FileKey ?? OdinCrypto.FileKey.New();
+        if (file.Payload is not null && file.Sealed is null)
+        {
+            throw new ArgumentException("A payload needs a sealed file: its key is in the key header", nameof(file));
+        }
+
         var transferIv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
         var payloadDescriptors = new JsonArray();
         if (file.Payload is { } p)
@@ -107,9 +132,9 @@ public sealed class OdinClient(HttpClient http)
             {
                 ["payloadKey"] = p.Key,
                 ["contentType"] = p.ContentType,
-                ["iv"] = Convert.ToBase64String(fileKey.Iv),
+                ["iv"] = Convert.ToBase64String(p.Iv),
                 ["descriptorContent"] = null,
-                ["previewThumbnail"] = null,
+                ["previewThumbnail"] = p.PreviewThumbnail?.ToJson(),
                 ["thumbnails"] = new JsonArray([.. p.Thumbnails.Select(t => new JsonObject
                 {
                     ["thumbnailKey"] = t.Key(p.Key),
@@ -129,10 +154,11 @@ public sealed class OdinClient(HttpClient http)
         };
         var descriptor = new JsonObject
         {
-            ["encryptedKeyHeader"] = OdinCrypto.LockFileKey(fileKey, credentials.DriveKey),
+            ["encryptedKeyHeader"] = file.Sealed?.KeyHeader.DeepClone() ??
+                                     OdinCrypto.EmptyKeyHeader(credentials.SharedSecret, transferIv),
             ["fileMetadata"] = new JsonObject
             {
-                ["isEncrypted"] = true,
+                ["isEncrypted"] = file.Sealed is not null,
                 ["allowDistribution"] = false,
                 ["accessControlList"] = new JsonObject { ["requiredSecurityGroup"] = "owner" },
                 ["appData"] = new JsonObject
@@ -146,11 +172,8 @@ public sealed class OdinClient(HttpClient http)
                         : new JsonArray([.. file.Tags.Select(t => JsonValue.Create(t.ToString("D")))]),
                     ["groupId"] = file.GroupId?.ToString("D"),
                     ["archivalStatus"] = 0,
-                    ["content"] = file.Content is null
-                        ? null
-                        : Convert.ToBase64String(OdinCrypto.AesCbcEncrypt(fileKey.AesKey, fileKey.Iv,
-                            Encoding.UTF8.GetBytes(file.Content))),
-                    ["previewThumbnail"] = null,
+                    ["content"] = file.Sealed?.Content,
+                    ["previewThumbnail"] = file.Payload?.PreviewThumbnail?.ToJson(),
                 },
                 ["versionTag"] = null,
             },
@@ -167,17 +190,13 @@ public sealed class OdinClient(HttpClient http)
         {
             foreach (var thumbnail in payload.Thumbnails)
             {
-                form.Add(new ByteArrayContent(OdinCrypto.AesCbcEncrypt(fileKey.AesKey, fileKey.Iv, thumbnail.Bytes))
-                {
-                    Headers = { ContentType = new(thumbnail.ContentType) },
-                }, "thumbnail", thumbnail.Key(payload.Key));
+                form.Add(new ByteArrayContent(thumbnail.Bytes) { Headers = { ContentType = new(thumbnail.ContentType) } },
+                    "thumbnail", thumbnail.Key(payload.Key));
             }
 
             // Last, and streamed: an original can be a large video.
-            form.Add(new StreamContent(OdinCrypto.AesCbcEncryptingStream(fileKey.AesKey, fileKey.Iv, payload.Bytes))
-            {
-                Headers = { ContentType = new(payload.ContentType) },
-            }, "payload", payload.Key);
+            form.Add(new StreamContent(payload.Bytes) { Headers = { ContentType = new(payload.ContentType) } },
+                "payload", payload.Key);
         }
 
         return SendAsync(credentials,
@@ -222,47 +241,22 @@ public sealed class OdinClient(HttpClient http)
     }
 
     /// <summary>
-    /// GET /api/v2/drives/{alias}/files/by-uid/{uid}/payload/{key}: the payload's
-    /// bytes as Odin stores them (encrypted with the file key), or null with the
-    /// status if Odin didn't return them.
+    /// GET <paramref name="pathAfterFiles"/> under the drive's files, Odin's
+    /// response as is (status, headers, body unread), for passing bytes through.
+    /// The caller disposes it.
     /// </summary>
-    public async Task<(int Status, byte[]? Bytes)> GetPayloadByUniqueIdAsync(HomebaseCredentials credentials,
-        string driveAlias, Guid uniqueId, string payloadKey, CancellationToken ct)
+    public async Task<HttpResponseMessage> GetRawAsync(HomebaseCredentials credentials, string driveAlias,
+        string pathAfterFiles, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get,
-            $"{FilesRoot(credentials, driveAlias)}/by-uid/{uniqueId:D}/payload/{payloadKey}");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{FilesRoot(credentials, driveAlias)}/{pathAfterFiles}");
         request.Headers.Authorization = AuthenticationHeaderValue.Parse(credentials.BearerToken);
-        using var response = await http.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode) return ((int)response.StatusCode, null);
-        return ((int)response.StatusCode, await response.Content.ReadAsByteArrayAsync(ct));
+        return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
-    /// <summary>
-    /// GET /api/v2/drives/{alias}/files/by-uid/{uid}/payload/{key}/thumb: the
-    /// thumbnail of exactly this size (directMatchOnly), as Odin stores it
-    /// (encrypted with the file key and the payload's IV).
-    /// </summary>
-    public async Task<(int Status, byte[]? Bytes)> GetThumbnailByUniqueIdAsync(HomebaseCredentials credentials,
-        string driveAlias, Guid uniqueId, string payloadKey, int width, int height, CancellationToken ct)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Get,
-            $"{FilesRoot(credentials, driveAlias)}/by-uid/{uniqueId:D}/payload/{payloadKey}/thumb" +
-            $"?width={width}&height={height}&directMatchOnly=true");
-        request.Headers.Authorization = AuthenticationHeaderValue.Parse(credentials.BearerToken);
-        using var response = await http.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode) return ((int)response.StatusCode, null);
-        return ((int)response.StatusCode, await response.Content.ReadAsByteArrayAsync(ct));
-    }
-
-    /// <summary>A file header's appData.content, decrypted with its file key (null if it has none).</summary>
-    public static string? DecryptContent(JsonNode header, byte[] driveKey)
-    {
-        var content = header["fileMetadata"]?["appData"]?["content"]?.GetValue<string>();
-        if (string.IsNullOrEmpty(content)) return null;
-        var fileKey = OdinCrypto.OpenFileKey(header["sharedSecretEncryptedKeyHeader"]!, driveKey);
-        return Encoding.UTF8.GetString(
-            OdinCrypto.AesCbcDecrypt(fileKey.AesKey, fileKey.Iv, Convert.FromBase64String(content)));
-    }
+    /// <summary>A payload's descriptor in a file header, or null if the file has none by that key.</summary>
+    public static JsonNode? Payload(JsonNode header, string payloadKey) =>
+        header["fileMetadata"]?["payloads"]?.AsArray()
+            .FirstOrDefault(p => p?["key"]?.GetValue<string>() == payloadKey);
 
     /// <summary>A file header's last change, in Ente's microseconds.</summary>
     public static long UpdatedMicros(JsonNode header) =>

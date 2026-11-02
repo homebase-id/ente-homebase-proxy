@@ -56,24 +56,24 @@ public static class CollectionsHandlers
     }
 
     /// <summary>
-    /// POST /collections: a new album. One Odin call: create the album's file,
-    /// whose content is the collection as the client sent it (keys and name
-    /// already encrypted by the client), plus its new ID.
+    /// POST /collections, body {"homebase": sealed record}: a new album. One
+    /// Odin call, which creates the album's file as the web app sealed it,
+    /// under a new ID.
     /// </summary>
     private static async Task<IResult> Create(HttpContext context, OdinClient odin, CancellationToken ct)
     {
         if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
 
-        JsonObject stored;
+        SealedRecord sealedRecord;
         try
         {
             if (await JsonNode.ParseAsync(context.Request.Body, cancellationToken: ct) is not JsonObject body ||
-                body["encryptedKey"] is null || body["type"] is null)
+                SealedRecord.Read(body["homebase"]) is not { } read)
             {
                 return EnteResults.Status(400);
             }
 
-            stored = body;
+            sealedRecord = read;
         }
         catch (JsonException)
         {
@@ -81,15 +81,14 @@ public static class CollectionsHandlers
         }
 
         var id = EnteIds.NewId();
-        stored["id"] = id;
         var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(EnteIds.ToGuid(EnteIds.Kind.Collection, id), EnteDrive.CollectionFileType,
-                stored.ToJsonString()), ct);
+            new NewOdinFile(EnteIds.ToGuid(EnteIds.Kind.Collection, id), EnteDrive.CollectionFileType, sealedRecord),
+            ct);
         if (!response.IsSuccess) return EnteResults.OdinFailure(response);
 
         return Results.Json(new
         {
-            collection = EnteRecords.Collection(stored, credentials, EnteRecords.NowMicros()),
+            collection = EnteRecords.Collection(id, sealedRecord, credentials, EnteRecords.NowMicros()),
         });
     }
 
@@ -104,12 +103,15 @@ public static class CollectionsHandlers
             EnteIds.ToGuid(EnteIds.Kind.Collection, collectionID), ct);
         if (response.Status == 404) return EnteResults.Status(404);
         if (!response.IsSuccess || response.Body is null) return EnteResults.OdinFailure(response);
-        var stored = EnteRecords.Content(response.Body, credentials);
-        if (stored is null) return EnteResults.ApiError(502, "HOMEBASE_ERROR", "The album has no content");
+        if (SealedRecord.FromHeader(response.Body) is not { } sealedRecord)
+        {
+            return EnteResults.ApiError(502, "HOMEBASE_ERROR", "The album isn't sealed by the web app");
+        }
 
         return Results.Json(new
         {
-            collection = EnteRecords.Collection(stored, credentials, OdinClient.UpdatedMicros(response.Body)),
+            collection = EnteRecords.Collection(collectionID, sealedRecord, credentials,
+                OdinClient.UpdatedMicros(response.Body)),
         });
     }
 
@@ -134,10 +136,10 @@ public static class CollectionsHandlers
         var collections = new JsonArray();
         foreach (var header in headers)
         {
-            if (EnteRecords.IdOf(header, EnteIds.Kind.Collection) is null) continue;
-            if (EnteRecords.Content(header, credentials) is { } stored)
+            if (EnteRecords.IdOf(header, EnteIds.Kind.Collection) is { } ids &&
+                SealedRecord.FromHeader(header) is { } sealedRecord)
             {
-                collections.Add(EnteRecords.Collection(stored, credentials, now));
+                collections.Add(EnteRecords.Collection(ids.Id, sealedRecord, credentials, now));
             }
         }
 
@@ -147,7 +149,7 @@ public static class CollectionsHandlers
     /// <summary>
     /// GET /collections/v2/diff?collectionID&amp;sinceTime: the album's photos
     /// changed since sinceTime. Two Odin calls (decision 4): the album's
-    /// memberships, then the photo records they point to.
+    /// memberships, then the photos they point to.
     /// </summary>
     private static async Task<IResult> GetDiffV2(HttpContext context, OdinClient odin, CancellationToken ct)
     {
@@ -164,15 +166,15 @@ public static class CollectionsHandlers
             }, MaxRecords, ct);
         if (!membershipsResponse.IsSuccess) return EnteResults.OdinFailure(membershipsResponse);
 
-        var changed = new List<(long FileId, JsonObject Membership, long Updated)>();
+        // A membership holds nothing but its uniqueId (album and photo).
+        var changed = new List<(long FileId, long Updated)>();
         foreach (var header in membershipHeaders)
         {
             var updated = OdinClient.UpdatedMicros(header);
             if (updated <= sinceTime - ClockSkewMicros) continue;
-            if (EnteRecords.IdOf(header, EnteIds.Kind.Membership) is not { } ids || ids.Middle != cid) continue;
-            if (EnteRecords.Content(header, credentials) is { } membership)
+            if (EnteRecords.IdOf(header, EnteIds.Kind.Membership) is { } ids && ids.Middle == cid)
             {
-                changed.Add((ids.Id, membership, updated));
+                changed.Add((ids.Id, updated));
             }
         }
 
@@ -190,21 +192,19 @@ public static class CollectionsHandlers
                 }, MaxRecords, ct);
             if (!recordsResponse.IsSuccess) return EnteResults.OdinFailure(recordsResponse);
 
-            var records = new Dictionary<long, (JsonObject Record, long Updated)>();
+            var photos = new Dictionary<long, JsonNode>();
             foreach (var header in recordHeaders)
             {
-                if (EnteRecords.IdOf(header, EnteIds.Kind.File) is { } ids &&
-                    EnteRecords.Content(header, credentials) is { } record)
-                {
-                    records[ids.Id] = (record, OdinClient.UpdatedMicros(header));
-                }
+                if (EnteRecords.IdOf(header, EnteIds.Kind.File) is { } ids) photos[ids.Id] = header;
             }
 
             // Oldest first, as Ente's server returns diffs.
-            foreach (var (fileId, membership, updated) in changed.OrderBy(c => c.Updated))
+            foreach (var (fileId, updated) in changed.OrderBy(c => c.Updated))
             {
-                if (!records.TryGetValue(fileId, out var r)) continue;
-                diff.Add(EnteRecords.File(r.Record, membership, Math.Max(updated, r.Updated)));
+                if (!photos.TryGetValue(fileId, out var header)) continue;
+                var file = EnteRecords.File(fileId, cid, header, credentials,
+                    Math.Max(updated, OdinClient.UpdatedMicros(header)));
+                if (file is not null) diff.Add(file);
             }
         }
 

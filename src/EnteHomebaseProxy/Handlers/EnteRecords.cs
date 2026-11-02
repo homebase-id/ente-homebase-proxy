@@ -7,16 +7,18 @@ namespace EnteHomebaseProxy.Handlers;
 
 /// <summary>
 /// Ente's album and photo records as they're kept on Homebase (STATUS.md,
-/// decisions 1 and 4), and their Ente response shapes (web/packages/media/
+/// decisions 1, 2 and 4), and their Ente response shapes (web/packages/media/
 /// collection.ts RemoteCollection, file.ts RemoteEnteFile).
 ///
-/// - An album is one file (kind Collection): content is the collection as the
-///   client sent it, plus its id.
-/// - A photo is one file (kind File): content is Ente's file record without
-///   the per-album key.
-/// - A photo in an album is one file (kind Membership, groupId = the album):
-///   content is that album's copy of the photo's key.
-/// Everything inside is Ente's own ciphertext, carried as is.
+/// - An album is one file (kind Collection), sealed by the web app.
+/// - A photo is one file (kind File), sealed by the web app, with the original
+///   and its thumbnails as its payload.
+/// - A photo in an album is one unencrypted, empty file (kind Membership,
+///   groupId = the album).
+///
+/// What's sealed goes to the web app as "homebase": {keyHeader, content}, which
+/// it opens in place of Ente's decryption. Ente's own encrypted fields are blank,
+/// because there's no Ente encryption on these records.
 /// </summary>
 public static class EnteRecords
 {
@@ -29,43 +31,64 @@ public static class EnteRecords
         ["email"] = EnteIds.Email(credentials.Identity),
     };
 
-    /// <summary>An album's stored content as Ente's RemoteCollection.</summary>
-    public static JsonObject Collection(JsonObject stored, HomebaseCredentials credentials, long updationTime)
+    /// <summary>
+    /// An album as Ente's RemoteCollection. Its type is inside the sealed
+    /// record; "album" here only fills the field Ente's schema requires, and the
+    /// web app replaces it when it opens the record.
+    /// </summary>
+    public static JsonObject Collection(long id, SealedRecord sealedRecord, HomebaseCredentials credentials,
+        long updationTime) => new()
     {
-        var collection = (JsonObject)stored.DeepClone();
-        collection["owner"] = Owner(credentials);
-        collection["sharees"] = new JsonArray();
-        collection["publicURLs"] = new JsonArray();
-        collection["isDeleted"] = false;
-        collection["updationTime"] = updationTime;
-        return collection;
-    }
+        ["id"] = id,
+        ["owner"] = Owner(credentials),
+        ["encryptedKey"] = "",
+        ["keyDecryptionNonce"] = "",
+        ["type"] = "album",
+        ["sharees"] = new JsonArray(),
+        ["publicURLs"] = new JsonArray(),
+        ["isDeleted"] = false,
+        ["updationTime"] = updationTime,
+        ["homebase"] = sealedRecord.ToJson(),
+    };
 
-    /// <summary>A photo's record and its album membership as Ente's RemoteEnteFile.</summary>
-    public static JsonObject File(JsonObject record, JsonObject membership, long updationTime)
+    /// <summary>
+    /// A photo in an album as Ente's RemoteEnteFile, from its Odin header. Its
+    /// details are in the sealed record. The original's payload IV goes in
+    /// Ente's per-object decryptionHeader, and the sizes come from Odin.
+    /// Null if the header isn't a photo kept this way.
+    /// </summary>
+    public static JsonObject? File(long fileId, long collectionId, JsonNode header, HomebaseCredentials credentials,
+        long updationTime)
     {
-        var file = (JsonObject)record.DeepClone();
-        file["collectionID"] = membership["collectionID"]!.DeepClone();
-        file["encryptedKey"] = membership["encryptedKey"]!.DeepClone();
-        file["keyDecryptionNonce"] = membership["keyDecryptionNonce"]!.DeepClone();
-        file["isDeleted"] = false;
-        file["updationTime"] = updationTime;
-        return file;
-    }
-
-    /// <summary>A header's decrypted content as a JSON object, or null.</summary>
-    public static JsonObject? Content(JsonNode header, HomebaseCredentials credentials)
-    {
-        var json = OdinClient.DecryptContent(header, credentials.DriveKey);
-        if (json is null) return null;
-        try
-        {
-            return JsonNode.Parse(json) as JsonObject;
-        }
-        catch (JsonException)
+        if (SealedRecord.FromHeader(header) is not { } sealedRecord ||
+            OdinClient.Payload(header, EnteDrive.PhotoPayloadKey) is not { } payload ||
+            payload["iv"]?.GetValueKind() != JsonValueKind.String)
         {
             return null;
         }
+
+        var objectHeader = $"{EnteDrive.PhotoFormat}:{payload["iv"]!.GetValue<string>()}";
+        var thumbSize = payload["thumbnails"]?.AsArray()
+            .Sum(t => t?["bytesWritten"]?.GetValue<long>() ?? 0) ?? 0;
+        return new JsonObject
+        {
+            ["id"] = fileId,
+            ["collectionID"] = collectionId,
+            ["ownerID"] = EnteIds.UserId(credentials.Identity),
+            ["encryptedKey"] = "",
+            ["keyDecryptionNonce"] = "",
+            ["file"] = new JsonObject { ["decryptionHeader"] = objectHeader },
+            ["thumbnail"] = new JsonObject { ["decryptionHeader"] = objectHeader },
+            ["metadata"] = new JsonObject { ["encryptedData"] = "", ["decryptionHeader"] = EnteDrive.PhotoFormat },
+            ["info"] = new JsonObject
+            {
+                ["fileSize"] = payload["bytesWritten"]?.GetValue<long>(),
+                ["thumbSize"] = thumbSize,
+            },
+            ["isDeleted"] = false,
+            ["updationTime"] = updationTime,
+            ["homebase"] = sealedRecord.ToJson(),
+        };
     }
 
     /// <summary>The Ente number in a header's uniqueId, if it's of this kind.</summary>

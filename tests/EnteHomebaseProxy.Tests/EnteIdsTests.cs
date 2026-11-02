@@ -1,4 +1,3 @@
-using EnteHomebaseProxy.Odin;
 
 namespace EnteHomebaseProxy.Tests;
 
@@ -49,18 +48,5 @@ public class EnteIdsTests
     {
         // web/packages/homebase/ente.test.ts checks the same value.
         Assert.Equal(256750248973160, EnteIds.UserId("frodo.baggins.demo.rocks"));
-    }
-
-    [Fact]
-    public void AnObjectKeyIsDerivedTheSameWayEveryTime()
-    {
-        var driveKey = Enumerable.Repeat((byte)7, 16).ToArray();
-        var uid = EnteIds.ToGuid(EnteIds.Kind.Object, 123);
-        var a = OdinCrypto.DeriveObjectKey(driveKey, uid);
-        var b = OdinCrypto.DeriveObjectKey(driveKey, uid);
-        var other = OdinCrypto.DeriveObjectKey(driveKey, EnteIds.ToGuid(EnteIds.Kind.Object, 124));
-        Assert.Equal(a.AesKey, b.AesKey);
-        Assert.Equal(a.Iv, b.Iv);
-        Assert.NotEqual(a.AesKey, other.AesKey);
     }
 }

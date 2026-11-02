@@ -18,11 +18,10 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
     private static readonly string FakeToken = Convert.ToBase64String(Encoding.UTF8.GetBytes(
         JsonSerializer.Serialize(new
         {
-            v = 1,
+            v = 2,
             identity = "frodo.example.test",
             token = Convert.ToBase64String(Enumerable.Repeat((byte)0x5a, 33).ToArray()),
             ss = Convert.ToBase64String(Enumerable.Repeat((byte)0x6b, 16).ToArray()),
-            dk = Convert.ToBase64String(Enumerable.Repeat((byte)0x7c, 16).ToArray()),
         })));
 
     private CancellationToken Ct => TestContext.Current.CancellationToken;
