@@ -28,9 +28,9 @@ public static class EnteDrive
     public const int ObjectFileType = 7204;
 
     /// <summary>
-    /// A photo: Ente's file record (without the per-album key) as content, the
-    /// original as the payload (<see cref="PhotoPayloadKey"/>) and Ente's
-    /// thumbnail as that payload's thumbnail, Homebase's way.
+    /// A photo: Ente's file record (without the per-album key) as content, and
+    /// the original as the payload (<see cref="PhotoPayloadKey"/>) with its
+    /// thumbnails, encrypted by the web app in Homebase's format.
     /// </summary>
     public const int FileRecordFileType = 7210;
 
@@ -40,18 +40,27 @@ public static class EnteDrive
     /// <summary>The payload key of an object file's bytes (Odin: 8–10 of [a-z0-9_]).</summary>
     public const string ObjectPayloadKey = "enteobj1";
 
-    /// <summary>The payload key of a photo's original, on its file record.</summary>
-    public const string PhotoPayloadKey = "entefile";
+    /// <summary>
+    /// The payload key of a photo's original: plain media (an image, a video, or
+    /// a live photo's zip) under Homebase's encryption only, which the web app
+    /// applies. Contract: photo.payloadKey.
+    /// </summary>
+    public const string PhotoPayloadKey = "original";
 
     /// <summary>
-    /// The size a photo's thumbnail is filed under. Ente's thumbnail is its own
-    /// ciphertext, so its real size isn't known here; Ente makes them at most
-    /// 720 px (web/packages/gallery/services/upload/thumbnail.ts).
+    /// What the web app puts in a photo record's file and thumbnail
+    /// decryptionHeader: the bytes have no Ente encryption. Contract: photo.format.
     /// </summary>
-    public const int ThumbnailPixels = 720;
+    public const string PhotoFormat = "homebase-v1";
 
-    /// <summary>What a photo's payload and thumbnail are: Ente's encryption, opened only by Ente.</summary>
-    public const string EnteCiphertextType = "application/octet-stream";
+    /// <summary>
+    /// How photos uploaded on 2026-10-30, between the object files and the
+    /// web app encrypting in Homebase's format, were kept: Ente's ciphertext as
+    /// the payload under this key, with Ente's thumbnail filed as 720×720. Read only.
+    /// </summary>
+    public const string EnteCiphertextPayloadKey = "entefile";
+
+    public const int EnteCiphertextThumbnailPixels = 720;
 
     // The password file (uniqueId c7a886cd-326a-41db-9922-e92828ed02ec, fileType
     // 7200) belongs to the web app. The proxy never reads, writes, lists or

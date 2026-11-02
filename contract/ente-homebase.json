@@ -17,7 +17,22 @@
     },
     "passwordFile": { "uniqueId": "c7a886cd-326a-41db-9922-e92828ed02ec", "fileType": 7200 },
     "keyAttributesFile": { "uniqueId": "d269c173-71a3-4fe4-8ee4-8d4da5c929e7", "fileType": 7201 },
+    "photo": {
+        "fileType": 7210,
+        "payloadKey": "original",
+        "format": "homebase-v1",
+        "keyInfo": "ente-homebase-object"
+    },
     "testValues": {
-        "enteUserID": { "identity": "frodo.baggins.demo.rocks", "userID": 256750248973160 }
+        "enteUserID": { "identity": "frodo.baggins.demo.rocks", "userID": 256750248973160 },
+        "photoKey": {
+            "driveKey": "AAECAwQFBgcICQoLDA0ODw==",
+            "fileID": 3672856974923286,
+            "uniqueId": "01000000-0000-0000-000d-0c71a74d1616",
+            "aesKey": "5ed72441b8e5987d1e55d7364f285758",
+            "iv": "57c5b70fbf97a9e40a3e188ef526d5af",
+            "plaintext": "hello homebase",
+            "ciphertext": "Z9LEPwmA4ChvBtF87CMEzA=="
+        }
     }
 }
