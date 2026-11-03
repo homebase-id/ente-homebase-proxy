@@ -27,6 +27,7 @@ public static class CollectionsHandlers
         app.MapGet("/collections/{collectionID:long}", GetById);
         app.MapGet("/collections/v2", GetV2);
         app.MapGet("/collections/v2/diff", GetDiffV2);
+        app.MapPost("/collections/add-files", AddFiles);
 
         Todo.Map(app, "GET", "/collections",
             "Deprecated by /collections/v2, which is implemented.");
@@ -36,8 +37,6 @@ public static class CollectionsHandlers
         Todo.Map(app, "GET", "/collections/file",
             "Reads one file within a collection. Would be GET /api/v2/drives/{alias}/files/by-uid/{uid}/header " +
             "for the membership and the record: two calls.");
-        Todo.Map(app, "POST", "/collections/add-files",
-            "Adds photos to an album: one membership create per photo (allowed by decision 5).");
         Todo.Map(app, "POST", "/collections/move-files",
             "Moves photos between albums: per photo, create the new membership and soft-delete the old one.");
         Todo.Map(app, "POST", "/collections/v3/remove-files",
@@ -90,6 +89,64 @@ public static class CollectionsHandlers
         {
             collection = EnteRecords.Collection(id, sealedRecord, credentials, EnteRecords.NowMicros()),
         });
+    }
+
+    /// <summary>Most photos one add-files call takes (the web app sends batches of 1000).</summary>
+    private const int MaxAddFiles = 1000;
+
+    /// <summary>
+    /// POST /collections/add-files, body {collectionID, files: [{id,
+    /// encryptedKey, keyDecryptionNonce}]}: puts photos the owner already has
+    /// in an album. The encrypted keys are Ente's and mean nothing here (a
+    /// photo has one key, its own), so only the IDs are read. One Odin call for
+    /// the album, then one membership create per photo (decision 5). A photo
+    /// already in the album is left as it is.
+    /// </summary>
+    private static async Task<IResult> AddFiles(HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+
+        long collectionId;
+        var fileIds = new List<long>();
+        try
+        {
+            if (await JsonNode.ParseAsync(context.Request.Body, cancellationToken: ct) is not JsonObject body ||
+                EnteRecords.Long(body["collectionID"]) is not { } cid || cid is <= 0 or > EnteIds.MaxSafeInteger ||
+                body["files"] is not JsonArray files || files.Count is 0 or > MaxAddFiles)
+            {
+                return EnteResults.Status(400);
+            }
+
+            collectionId = cid;
+            foreach (var file in files)
+            {
+                if (file is not JsonObject item || EnteRecords.Long(item["id"]) is not { } id ||
+                    id is <= 0 or > EnteIds.MaxSafeInteger)
+                {
+                    return EnteResults.Status(400);
+                }
+
+                if (!fileIds.Contains(id)) fileIds.Add(id);
+            }
+        }
+        catch (JsonException)
+        {
+            return EnteResults.Status(400);
+        }
+
+        var album = await odin.GetHeaderByUniqueIdAsync(credentials, EnteDrive.Alias,
+            EnteIds.ToGuid(EnteIds.Kind.Collection, collectionId), ct);
+        if (album.Status == 404) return EnteResults.Status(404);
+        if (!album.IsSuccess) return EnteResults.OdinFailure(album);
+
+        foreach (var fileId in fileIds)
+        {
+            var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
+                EnteRecords.Membership(collectionId, fileId), ct);
+            if (!response.IsSuccess && !response.IsExistingUniqueId) return EnteResults.OdinFailure(response);
+        }
+
+        return Results.Ok();
     }
 
     /// <summary>GET /collections/{id}: one album. One Odin call: its header by uniqueId.</summary>

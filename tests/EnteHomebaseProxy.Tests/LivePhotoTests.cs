@@ -15,7 +15,8 @@ namespace EnteHomebaseProxy.Tests;
 /// The test plays the web app. It seals the records and encrypts the
 /// original and thumbnail with keys only it has, then checks that what comes
 /// back opens to exactly what it sent. It deletes the three files it made
-/// afterwards, by their uniqueIds, and touches nothing else.
+/// afterwards, by their uniqueIds, and touches nothing else (with a second
+/// album the photo is added to, that's five).
 /// </summary>
 public class LivePhotoTests(ProxyServer proxy) : IClassFixture<ProxyServer>
 {
@@ -49,6 +50,7 @@ public class LivePhotoTests(ProxyServer proxy) : IClassFixture<ProxyServer>
     {
         var live = await LiveHomebase.OpenOrSkipAsync(Ct);
         long? collectionId = null;
+        long? secondId = null;
         var fileId = EnteIds.NewId();
         try
         {
@@ -81,7 +83,9 @@ public class LivePhotoTests(ProxyServer proxy) : IClassFixture<ProxyServer>
                 ["contentType"] = "image/jpeg",
                 ["thumbnails"] = new JsonArray(new JsonObject
                 {
-                    ["pixelWidth"] = 320, ["pixelHeight"] = 240, ["contentType"] = "image/webp",
+                    ["pixelWidth"] = 320,
+                    ["pixelHeight"] = 240,
+                    ["contentType"] = "image/webp",
                 }),
             };
             var form = new MultipartFormDataContent
@@ -145,10 +149,53 @@ public class LivePhotoTests(ProxyServer proxy) : IClassFixture<ProxyServer>
             Assert.True(membership.IsSuccess, $"membership: HTTP {membership.Status}");
             Assert.False(membership.Body!["fileMetadata"]!["isEncrypted"]!.GetValue<bool>());
             Assert.Null(membership.Body!["fileMetadata"]!["appData"]!["content"]?.GetValue<string>());
+
+            // Added to a second album: its diff has the photo, and adding it
+            // again changes nothing.
+            var second = await Json(Request(HttpMethod.Post, "/collections", live,
+                new StringContent(new JsonObject
+                {
+                    ["homebase"] = live.Seal("""{"type":"album","name":"second"}""", LiveHomebase.FileKey.New()),
+                }.ToJsonString(), Encoding.UTF8, "application/json")));
+            secondId = second["collection"]!["id"]!.GetValue<long>();
+            var add = new JsonObject
+            {
+                ["collectionID"] = secondId,
+                ["files"] = new JsonArray(new JsonObject
+                {
+                    ["id"] = fileId,
+                    ["encryptedKey"] = "ignored",
+                    ["keyDecryptionNonce"] = "ignored",
+                }),
+            }.ToJsonString();
+            for (var i = 0; i < 2; i++)
+            {
+                var added = await proxy.Client.SendAsync(Request(HttpMethod.Post, "/collections/add-files", live,
+                    new StringContent(add, Encoding.UTF8, "application/json")), Ct);
+                Assert.Equal(HttpStatusCode.OK, added.StatusCode);
+            }
+
+            var secondDiff = await Json(Request(HttpMethod.Get,
+                $"/collections/v2/diff?collectionID={secondId}&sinceTime=0", live));
+            var inSecond = secondDiff["diff"]!.AsArray().Single()!;
+            Assert.Equal(fileId, inSecond["id"]!.GetValue<long>());
+            Assert.Equal(secondId, inSecond["collectionID"]!.GetValue<long>());
+            Assert.Equal(detailsJson, live.Open(inSecond["homebase"]!));
+
+            var missing = await proxy.Client.SendAsync(Request(HttpMethod.Post, "/collections/add-files", live,
+                new StringContent(add.Replace($"\"collectionID\":{secondId}", $"\"collectionID\":{EnteIds.NewId()}"),
+                    Encoding.UTF8, "application/json")), Ct);
+            Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
         }
         finally
         {
             await live.HardDeleteByUniqueIdAsync(EnteIds.ToGuid(EnteIds.Kind.File, fileId), CancellationToken.None);
+            if (secondId is { } sid)
+            {
+                await live.HardDeleteByUniqueIdAsync(EnteIds.MembershipGuid(sid, fileId), CancellationToken.None);
+                await live.HardDeleteByUniqueIdAsync(EnteIds.ToGuid(EnteIds.Kind.Collection, sid),
+                    CancellationToken.None);
+            }
             if (collectionId is { } cid)
             {
                 await live.HardDeleteByUniqueIdAsync(EnteIds.MembershipGuid(cid, fileId), CancellationToken.None);

@@ -64,6 +64,7 @@ The test photo and its album (Uncategorized) are in your Ente library on frodo.
 | `POST /collections`, `GET /collections/{id}` | 1 | An album, sealed by the web app |
 | `GET /collections/v2` | 1 | Every album; each album's updationTime is *now* (see below) |
 | `GET /collections/v2/diff` | 2 | The album's memberships, then their photos (sealed, with the payload IV from Odin's header) |
+| `POST /collections/add-files` | 1 + 1 per photo | Photos into another album: the album's header, then a membership per photo; one already in the album is left as is; Ente's file keys are ignored |
 | `POST /homebase/files` | 2 | A photo in one request (decision 2): one Homebase file, then its membership; up to 1 GiB, streamed; stored as sent |
 | `GET /homebase/files/{id}/thumb?width&height` | 1 | The thumbnail covering that size, as stored (the web app decrypts it) |
 | `GET /homebase/files/{id}/original` | 1 | The original, as stored, streamed (the web app decrypts it) |
@@ -73,8 +74,8 @@ Plus: Odin's encryption checked against the TypeScript and Node vectors; X-Auth-
 every Ente route in the five groups mapped and none mapped twice; `/health`; `/version` (the proxy's and the web app's commits); X-Request-Id; CORS
 (`Content-MD5` allowed for uploads); logs hold no token, query or body; Docker image.
 
-65 tests, all passing with `HOMEBASE_CREDENTIALS` set (2026-11-02). The key endpoint test ran
-because the old key attributes file had just been deleted; it skips again once you sign in.
+72 tests, all passing with `HOMEBASE_CREDENTIALS` set (2026-11-03), except the key endpoint test,
+which skips while a real key attributes file is on the drive.
 
 ## Worth knowing
 

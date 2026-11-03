@@ -72,6 +72,24 @@ public class ProxyBehaviorTests(ProxyServer proxy) : IClassFixture<ProxyServer>
         Assert.Contains("YouAuth", body["message"]!.GetValue<string>());
     }
 
+    // Checked before any Odin call, so the fake token never leaves the proxy.
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("""{"files":[{"id":1}]}""")]
+    [InlineData("""{"collectionID":0,"files":[{"id":1}]}""")]
+    [InlineData("""{"collectionID":1,"files":[]}""")]
+    [InlineData("""{"collectionID":1,"files":[{"id":-5}]}""")]
+    [InlineData("""{"collectionID":1,"files":[{"id":"1"}]}""")]
+    [InlineData("""{"collectionID":1,"files":[{}]}""")]
+    public async Task AddFilesWithABadBodyIs400(string body)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/collections/add-files")
+        { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        request.Headers.Add("X-Auth-Token", FakeToken);
+        var response = await proxy.Client.SendAsync(request, Ct);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task ARequestIdIsReturnedAndAPlainOneIsKept()
     {

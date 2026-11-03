@@ -184,12 +184,7 @@ public static class FilesHandlers
         if (!photoResponse.IsSuccess) return EnteResults.OdinFailure(photoResponse);
 
         var membershipResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(EnteIds.MembershipGuid(upload.CollectionID, upload.FileID), EnteDrive.MembershipFileType,
-                null)
-            {
-                GroupId = collectionGuid,
-                Tags = [fileGuid, collectionGuid],
-            }, ct);
+            EnteRecords.Membership(upload.CollectionID, upload.FileID), ct);
         if (!membershipResponse.IsSuccess) return EnteResults.OdinFailure(membershipResponse);
 
         // The answer is what was stored, in the shape of Odin's header, as the diff will return it.
@@ -262,11 +257,8 @@ public static class FilesHandlers
         IReadOnlyList<(int Width, int Height, string ContentType)> Thumbnails,
         OdinPreviewThumbnail? PreviewThumbnail);
 
-    private static long? Long(JsonNode? node) =>
-        node?.GetValueKind() == JsonValueKind.Number && node.AsValue().TryGetValue<long>(out var n) ? n : null;
-
     private static int? Pixels(JsonNode? node) =>
-        Long(node) is { } n and > 0 and <= 16384 ? (int)n : null;
+        EnteRecords.Long(node) is { } n and > 0 and <= 16384 ? (int)n : null;
 
     private static string? Text(JsonNode? node, int maxLength) =>
         node?.GetValueKind() == JsonValueKind.String && node.GetValue<string>() is { Length: > 0 } text &&
@@ -285,8 +277,8 @@ public static class FilesHandlers
     /// <summary>The request part, checked; null if anything is missing or out of range.</summary>
     private static UploadRequest? ReadUpload(JsonObject body)
     {
-        if (Long(body["fileID"]) is not { } fileID || fileID is <= 0 or > EnteIds.MaxSafeInteger) return null;
-        if (Long(body["collectionID"]) is not { } collectionID || collectionID is <= 0 or > EnteIds.MaxSafeInteger)
+        if (EnteRecords.Long(body["fileID"]) is not { } fileID || fileID is <= 0 or > EnteIds.MaxSafeInteger) return null;
+        if (EnteRecords.Long(body["collectionID"]) is not { } collectionID || collectionID is <= 0 or > EnteIds.MaxSafeInteger)
         {
             return null;
         }
