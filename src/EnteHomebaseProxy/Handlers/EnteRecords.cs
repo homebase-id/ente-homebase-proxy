@@ -48,7 +48,7 @@ public static class EnteRecords
     /// web app replaces it when it opens the record.
     /// </summary>
     public static JsonObject Collection(long id, SealedRecord sealedRecord, HomebaseCredentials credentials,
-        long updationTime) => new()
+        long updationTime, bool isDeleted = false) => new()
         {
             ["id"] = id,
             ["owner"] = Owner(credentials),
@@ -57,7 +57,7 @@ public static class EnteRecords
             ["type"] = "album",
             ["sharees"] = new JsonArray(),
             ["publicURLs"] = new JsonArray(),
-            ["isDeleted"] = false,
+            ["isDeleted"] = isDeleted,
             ["updationTime"] = updationTime,
             ["homebase"] = sealedRecord.ToJson(),
         };
@@ -102,6 +102,46 @@ public static class EnteRecords
         };
     }
 
+    /// <summary>
+    /// A photo gone from an album (removed, trashed or deleted) as Ente's
+    /// RemoteEnteFile: only its IDs and isDeleted mean anything, the rest is
+    /// blank, as Ente's server scrubs it.
+    /// </summary>
+    public static JsonObject DeletedFile(long fileId, long collectionId, HomebaseCredentials credentials,
+        long updationTime) => new()
+        {
+            ["id"] = fileId,
+            ["collectionID"] = collectionId,
+            ["ownerID"] = EnteIds.UserId(credentials.Identity),
+            ["encryptedKey"] = "",
+            ["keyDecryptionNonce"] = "",
+            ["file"] = new JsonObject { ["decryptionHeader"] = "" },
+            ["thumbnail"] = new JsonObject { ["decryptionHeader"] = "" },
+            ["metadata"] = new JsonObject { ["encryptedData"] = "", ["decryptionHeader"] = "" },
+            ["isDeleted"] = true,
+            ["updationTime"] = updationTime,
+        };
+
+    /// <summary>A photo's entry in the trash (see <see cref="EnteDrive.TrashFileType"/>).</summary>
+    public static NewOdinFile TrashEntry(long fileId, long collectionId) =>
+        new(EnteIds.ToGuid(EnteIds.Kind.Trash, fileId), EnteDrive.TrashFileType, null)
+        {
+            GroupId = EnteIds.ToGuid(EnteIds.Kind.Collection, collectionId),
+            Tags = [EnteIds.ToGuid(EnteIds.Kind.File, fileId)],
+        };
+
+    /// <summary>The Ente number of the first tag of this kind (a tombstone has no uniqueId, but keeps its tags).</summary>
+    public static long? TaggedId(JsonNode header, EnteIds.Kind kind) =>
+        OdinClient.Tags(header).Select(EnteIds.Parse)
+            .FirstOrDefault(p => p is { } t && t.Kind == kind)?.Id;
+
+    /// <summary>The album a membership or trash entry names in its groupId.</summary>
+    public static long? GroupCollectionId(JsonNode header) =>
+        Guid.TryParse(header["fileMetadata"]?["appData"]?["groupId"]?.GetValue<string>(), out var g) &&
+        EnteIds.Parse(g) is { Kind: EnteIds.Kind.Collection } p
+            ? p.Id
+            : null;
+
     /// <summary>The Ente number in a header's uniqueId, if it's of this kind.</summary>
     public static (long Middle, long Id)? IdOf(JsonNode header, EnteIds.Kind kind)
     {
@@ -111,11 +151,47 @@ public static class EnteRecords
         return parsed is { } p && p.Kind == kind ? (p.Middle, p.Id) : null;
     }
 
-    /// <summary>A long query parameter, or null if missing or not a number.</summary>
     /// <summary>A JSON whole number, or null.</summary>
     public static long? Long(JsonNode? node) =>
         node?.GetValueKind() == JsonValueKind.Number && node.AsValue().TryGetValue<long>(out var n) ? n : null;
 
+    /// <summary>An Ente ID: a whole number in 1..2^53-1, or null.</summary>
+    public static long? Id(JsonNode? node) =>
+        Long(node) is { } id && id is > 0 and <= EnteIds.MaxSafeInteger ? id : null;
+
+    /// <summary>
+    /// Ente IDs from a JSON array of numbers, or of objects with an "id"
+    /// (CollectionFileItem), without repeats, in order; null if the array is
+    /// missing, empty, longer than <paramref name="max"/>, or holds anything else.
+    /// </summary>
+    public static List<long>? Ids(JsonNode? node, int max)
+    {
+        if (node is not JsonArray array || array.Count is 0 || array.Count > max) return null;
+        var ids = new List<long>();
+        foreach (var item in array)
+        {
+            var id = item is JsonObject o ? Id(o["id"]) : Id(item);
+            if (id is not { } value) return null;
+            if (!ids.Contains(value)) ids.Add(value);
+        }
+
+        return ids;
+    }
+
+    /// <summary>The request body as a JSON object, or null if it isn't one.</summary>
+    public static async Task<JsonObject?> BodyAsync(HttpContext context, CancellationToken ct)
+    {
+        try
+        {
+            return await JsonNode.ParseAsync(context.Request.Body, cancellationToken: ct) as JsonObject;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A long query parameter, or null if missing or not a number.</summary>
     public static long? QueryLong(HttpContext context, string name) =>
         long.TryParse(context.Request.Query[name].ToString(), out var value) ? value : null;
 }

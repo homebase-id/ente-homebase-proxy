@@ -212,13 +212,22 @@ public sealed class OdinClient(HttpClient http)
 
     /// <summary>
     /// POST /api/v2/drives/{alias}/files/query-batch: the headers (with
-    /// encrypted content) of the active files matching
-    /// <paramref name="queryParams"/>, newest change first.
+    /// encrypted content) of the files matching <paramref name="queryParams"/>,
+    /// newest change first. Only active files unless
+    /// <paramref name="includeDeleted"/>; Odin itself filters nothing by
+    /// default, and a deleted file's header is a tombstone (no uniqueId,
+    /// content or payloads; its tags and groupId stay).
     /// </summary>
     public async Task<(OdinResponse Response, IReadOnlyList<JsonNode> Headers)> QueryBatchAsync(
         HomebaseCredentials credentials, string driveAlias, JsonObject queryParams, int maxRecords,
-        CancellationToken ct)
+        CancellationToken ct, bool includeDeleted = false)
     {
+        if (!includeDeleted && !queryParams.ContainsKey("fileState"))
+        {
+            queryParams = (JsonObject)queryParams.DeepClone();
+            queryParams["fileState"] = new JsonArray("active");
+        }
+
         var body = OdinCrypto.EncryptEnvelope(credentials.SharedSecret, new JsonObject
         {
             ["queryParams"] = queryParams,
@@ -253,6 +262,134 @@ public sealed class OdinClient(HttpClient http)
         return await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
+    /// <summary>
+    /// PATCH /api/v2/drives/{alias}/files/by-uid/{uid}: the file's content
+    /// replaced by <paramref name="sealedRecord"/> (as the web app sealed it,
+    /// with the same file key), the rest of its header as in
+    /// <paramref name="current"/>, which must be its latest (Odin checks the
+    /// version tag). Payloads are kept.
+    /// </summary>
+    public Task<OdinResponse> UpdateSealedAsync(HomebaseCredentials credentials, string driveAlias, Guid uniqueId,
+        JsonNode current, SealedRecord sealedRecord, CancellationToken ct)
+    {
+        var appData = current["fileMetadata"]?["appData"]?.DeepClone().AsObject() ?? new JsonObject();
+        appData["uniqueId"] = uniqueId.ToString("D");
+        appData["content"] = sealedRecord.Content;
+        var transferIv = System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        var instructions = new JsonObject
+        {
+            ["transferIv"] = Convert.ToBase64String(transferIv),
+            ["locale"] = "local",
+            ["recipients"] = new JsonArray(),
+            ["manifest"] = new JsonObject { ["payloadDescriptors"] = new JsonArray() },
+        };
+        var descriptor = new JsonObject
+        {
+            ["encryptedKeyHeader"] = sealedRecord.KeyHeader.DeepClone(),
+            ["fileMetadata"] = new JsonObject
+            {
+                ["isEncrypted"] = true,
+                ["allowDistribution"] = false,
+                ["accessControlList"] = new JsonObject { ["requiredSecurityGroup"] = "owner" },
+                ["appData"] = appData,
+                ["versionTag"] = VersionTag(current)?.ToString("D"),
+            },
+        };
+        var metadata = OdinCrypto.AesCbcEncrypt(credentials.SharedSecret, transferIv,
+            Encoding.UTF8.GetBytes(descriptor.ToJsonString()));
+        var form = new MultipartFormDataContent
+        {
+            { new StringContent(instructions.ToJsonString(), Encoding.UTF8, "application/json"), "instructions" },
+            { new ByteArrayContent(metadata) { Headers = { ContentType = new("application/octet-stream") } }, "metadata" },
+        };
+        return SendAsync(credentials,
+            new HttpRequestMessage(HttpMethod.Patch, $"{FilesRoot(credentials, driveAlias)}/by-uid/{uniqueId:D}")
+            {
+                Content = form,
+            }, ct);
+    }
+
+    /// <summary>POST soft-delete-batch: tombstones for these files (Odin file IDs); at most 1000.</summary>
+    public Task<OdinResponse> SoftDeleteAsync(HomebaseCredentials credentials, string driveAlias,
+        IEnumerable<Guid> fileIds, CancellationToken ct) =>
+        PostEnvelopeAsync(credentials, $"{FilesRoot(credentials, driveAlias)}/soft-delete-batch", new JsonObject
+        {
+            ["files"] = new JsonArray([.. fileIds.Select(id => new JsonObject { ["fileId"] = id.ToString("D") })]),
+        }, ct);
+
+    /// <summary>POST hard-delete-batch: these files gone, payloads and all, each only at its version; at most 1000.</summary>
+    public Task<OdinResponse> HardDeleteAsync(HomebaseCredentials credentials, string driveAlias,
+        IEnumerable<JsonNode> headers, CancellationToken ct) =>
+        PostEnvelopeAsync(credentials, $"{FilesRoot(credentials, driveAlias)}/hard-delete-batch", new JsonObject
+        {
+            ["files"] = VersionedFiles(headers),
+        }, ct);
+
+    /// <summary>
+    /// POST update-archival-status-batch: only appData.archivalStatus set on
+    /// each file, at the version in its header; at most 1000.
+    /// </summary>
+    public Task<OdinResponse> SetArchivalStatusAsync(HomebaseCredentials credentials, string driveAlias,
+        int archivalStatus, IEnumerable<JsonNode> headers, CancellationToken ct) =>
+        PostEnvelopeAsync(credentials, $"{FilesRoot(credentials, driveAlias)}/update-archival-status-batch",
+            new JsonObject { ["archivalStatus"] = archivalStatus, ["files"] = VersionedFiles(headers) }, ct);
+
+    private static JsonArray VersionedFiles(IEnumerable<JsonNode> headers) =>
+        new([.. headers.Select(h => new JsonObject
+        {
+            ["fileId"] = FileId(h)?.ToString("D"),
+            ["versionTag"] = VersionTag(h)?.ToString("D"),
+        })]);
+
+    private Task<OdinResponse> PostEnvelopeAsync(HomebaseCredentials credentials, string url, JsonObject request,
+        CancellationToken ct)
+    {
+        var body = OdinCrypto.EncryptEnvelope(credentials.SharedSecret, request.ToJsonString());
+        return SendAsync(credentials,
+            new HttpRequestMessage(HttpMethod.Post, url)
+            {
+                Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+            }, ct);
+    }
+
+    /// <summary>
+    /// The files a batch call didn't change, from its per-file results
+    /// (errorCode set). An empty list is success.
+    /// </summary>
+    public static IReadOnlyList<string> BatchFailures(OdinResponse response) =>
+        response.Body?["results"]?.AsArray()
+            .Where(r => r?["errorCode"] is { } code && code.GetValueKind() != JsonValueKind.Null)
+            .Select(r => r!["errorCode"]!.ToJsonString())
+            .ToList() ?? [];
+
+    /// <summary>A header's Odin file ID.</summary>
+    public static Guid? FileId(JsonNode header) =>
+        Guid.TryParse(header["fileId"]?.GetValue<string>(), out var id) ? id : null;
+
+    /// <summary>A header's version tag.</summary>
+    public static Guid? VersionTag(JsonNode header) =>
+        Guid.TryParse(header["fileMetadata"]?["versionTag"]?.GetValue<string>(), out var tag) ? tag : null;
+
+    /// <summary>A header's appData.archivalStatus (0 if unset).</summary>
+    public static int ArchivalStatus(JsonNode header) =>
+        header["fileMetadata"]?["appData"]?["archivalStatus"]?.GetValue<int>() ?? 0;
+
+    /// <summary>Whether the header is a tombstone (Odin's fileState "deleted").</summary>
+    public static bool IsDeleted(JsonNode header) =>
+        header["fileState"]?.GetValueKind() switch
+        {
+            JsonValueKind.String => header["fileState"]!.GetValue<string>() == "deleted",
+            JsonValueKind.Number => header["fileState"]!.GetValue<int>() == 0,
+            _ => false,
+        };
+
+    /// <summary>A header's appData tags.</summary>
+    public static IReadOnlyList<Guid> Tags(JsonNode header) =>
+        header["fileMetadata"]?["appData"]?["tags"]?.AsArray()
+            .Select(t => Guid.TryParse(t?.GetValue<string>(), out var g) ? g : Guid.Empty)
+            .Where(g => g != Guid.Empty)
+            .ToList() ?? [];
+
     /// <summary>A payload's descriptor in a file header, or null if the file has none by that key.</summary>
     public static JsonNode? Payload(JsonNode header, string payloadKey) =>
         header["fileMetadata"]?["payloads"]?.AsArray()
@@ -261,4 +398,8 @@ public sealed class OdinClient(HttpClient http)
     /// <summary>A file header's last change, in Ente's microseconds.</summary>
     public static long UpdatedMicros(JsonNode header) =>
         (header["fileMetadata"]?["updated"]?.GetValue<long>() ?? 0) * 1000;
+
+    /// <summary>When the file was made, in Ente microseconds.</summary>
+    public static long CreatedMicros(JsonNode header) =>
+        (header["fileMetadata"]?["created"]?.GetValue<long>() ?? 0) * 1000;
 }

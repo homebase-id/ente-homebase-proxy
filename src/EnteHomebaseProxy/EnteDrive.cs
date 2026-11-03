@@ -34,6 +34,30 @@ public static class EnteDrive
     /// </summary>
     public const int MembershipFileType = 7211;
 
+    /// <summary>
+    /// A photo in the trash: unencrypted, with no content. Its uniqueId names
+    /// the photo, its groupId is the album it was trashed from, and it was
+    /// made when the photo was trashed. When the photo leaves the trash it's
+    /// soft-deleted, with archivalStatus <see cref="TrashRestored"/> or
+    /// <see cref="TrashDeleted"/> first, so the trash diff can say which.
+    /// </summary>
+    public const int TrashFileType = 7212;
+
+    /// <summary>
+    /// Odin's archivalStatus on a photo in the trash, and on a deleted album
+    /// (Odin's 2, "removed"). Readers of the drive (chat-kmp) skip both.
+    /// </summary>
+    public const int Removed = 2;
+
+    /// <summary>A trash entry's archivalStatus once its photo is restored.</summary>
+    public const int TrashRestored = 1;
+
+    /// <summary>A trash entry's archivalStatus once its photo is deleted for good.</summary>
+    public const int TrashDeleted = 2;
+
+    /// <summary>How long a photo stays in the trash (Ente's 30 days), in microseconds.</summary>
+    public static readonly long TrashMicros = (long)TimeSpan.FromDays(30).TotalMicroseconds;
+
     /// <summary>The payload key of a photo's original (Odin: 8–10 of [a-z0-9_]). Contract: photo.payloadKey.</summary>
     public const string PhotoPayloadKey = "original";
 

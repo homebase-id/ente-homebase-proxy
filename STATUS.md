@@ -61,21 +61,32 @@ The test photo and its album (Uncategorized) are in your Ente library on frodo.
 | `PUT /users/attributes`, `GET /users/session-validity/v2` | 1 | Key attributes file, sealed by the web app; 403 if set, never overwritten |
 | `GET /users/details/v2` | 0 | The identity as an Ente user; a 1 TiB "homebase" plan. TODO: real usage |
 | `POST /users/logout` | 0 | Nothing to do on Homebase |
-| `POST /collections`, `GET /collections/{id}` | 1 | An album, sealed by the web app |
-| `GET /collections/v2` | 1 | Every album; each album's updationTime is *now* (see below) |
-| `GET /collections/v2/diff` | 2 | The album's memberships, then their photos (sealed, with the payload IV from Odin's header) |
+| `POST /collections`, `GET /collections/{id}` | 1 | An album, sealed by the web app; a deleted one says `isDeleted` |
+| `GET /collections/v2` | 1 | Every album, deleted ones as `isDeleted`; each album's updationTime is *now* (see below) |
+| `GET /collections/v2/diff` | 2 | The album's memberships (tombstones too), then their photos. A photo is in it when its membership or its own details changed; a removed, moved, trashed or deleted one is `isDeleted` |
 | `POST /collections/add-files` | 1 + 1 per photo | Photos into another album: the album's header, then a membership per photo; one already in the album is left as is; Ente's file keys are ignored |
+| `POST /collections/v3/remove-files` | 2 | The memberships, then a soft delete of them |
+| `POST /collections/move-files` | 3 + 1 per photo | add-files to one album, remove-files from the other |
+| `POST /collections/rename`, `PUT /collections/magic-metadata`, `PUT /collections/public-magic-metadata` | 2 | The album's details sealed again by the web app (same key, new IV): its header, then an update |
+| `DELETE /collections/v3/{id}?keepFiles` | 3 (+ trash) | The album marked removed (archivalStatus 2). keepFiles: 409 `COLLECTION_NOT_EMPTY` unless empty; otherwise its photos are trashed |
+| `PUT /files/magic-metadata`, `PUT /files/public-magic-metadata` | 1 + 1 per photo | Each photo's details sealed again by the web app (hide, archive, date, caption, location): the photos, then an update each; payloads untouched |
+| `POST /files/trash` | 4 + 1 per photo | Out of every album (memberships soft-deleted), a trash entry (7212: when, and from which album), and the photo marked removed; its bytes and details stay |
+| `GET /trash/v2/diff` | 2 | The trash entries (tombstones too), then the photos still in the trash; a closed entry is restored or deleted by the archivalStatus it was closed with; deleteBy is 30 days after trashing |
+| `POST /collections/restore-files` | 6 + 1 per photo | A membership each, the photo no longer removed, its trash entry closed as restored |
+| `POST /trash/delete`, `POST /trash/empty` | 5 | The photos hard-deleted (bytes and all), their trash entries closed as deleted |
 | `POST /homebase/files` | 2 | A photo in one request (decision 2): one Homebase file, then its membership; up to 1 GiB, streamed; stored as sent |
 | `GET /homebase/files/{id}/thumb?width&height` | 1 | The thumbnail covering that size, as stored (the web app decrypts it) |
 | `GET /homebase/files/{id}/original` | 1 | The original, as stored, streamed (the web app decrypts it) |
-| `/remote-store/feature-flags`, `/contacts/diff`, `/trash/v2/diff`, `/user-entity/entity/diff`, `/collection-actions/pending-remove` | 0 | Empty: nothing of that kind can exist yet |
+| `/remote-store/feature-flags`, `/contacts/diff`, `/user-entity/entity/diff`, `/collection-actions/pending-remove` | 0 | Empty: nothing of that kind can exist yet |
 
 Plus: Odin's encryption checked against the TypeScript and Node vectors; X-Auth-Token parsing;
 every Ente route in the five groups mapped and none mapped twice; `/health`; `/version` (the proxy's and the web app's commits); X-Request-Id; CORS
 (`Content-MD5` allowed for uploads); logs hold no token, query or body; Docker image.
 
-72 tests, all passing with `HOMEBASE_CREDENTIALS` set (2026-11-03), except the key endpoint test,
-which skips while a real key attributes file is on the drive.
+73 tests, all passing with `HOMEBASE_CREDENTIALS` set (2026-11-03), except the key endpoint test,
+which skips while a real key attributes file is on the drive. `LiveLibraryTests` takes one photo
+through all of the above on frodo (another album, an edit, a rename, removed, moved, trashed,
+restored, deleted for good, its albums deleted) and cleans up after itself.
 
 ## Worth knowing
 
@@ -103,7 +114,17 @@ which skips while a real key attributes file is on the drive.
   bytes, up to 16 more than the plain file.
 - **Older formats are gone.** Photos stored before 2026-11-02 (object files, Ente's ciphertext,
   derived keys) no longer read; the test data in them was deleted.
-- **No paging yet**: an album sync reads at most 1000 memberships, the album list 1000 albums.
+- **No paging yet**: an album sync reads at most 1000 memberships, the album list 1000 albums,
+  the trash 1000 entries.
+- **Removed is archivalStatus 2** (Odin's "removed"), on a photo in the trash and on a deleted
+  album; other readers of the drive (chat-kmp) skip it. A soft delete can't stand in for the
+  trash: Odin's tombstone drops the content and payloads, so nothing could be restored.
+- **Edits are sealed by the browser.** The proxy can't open a record, so an edit (album name or
+  settings, a photo's visibility, date, caption or location) arrives as the whole record sealed
+  again with the file's own key and a new IV; the proxy writes it as it is. The last write wins
+  (no version check).
+- **A deleted album's file stays** (marked removed), sealed, so a trashed photo from it still
+  opens. Ente's server also keeps a deleted collection.
 - **Security (prototype)**: the web app keeps the X-Auth-Token (the sign-in, no drive key)
   where Ente keeps its auth token (localStorage and IndexedDB, unencrypted).
 - **A failed upload leaves at most an orphaned photo with no album** (the photo file was made,

@@ -52,7 +52,9 @@ public static class EnteResults
     public static IResult OdinFailure(OdinResponse response) =>
         response.Status is 401 or 403
             ? InvalidToken()
-            : ApiError(502, "HOMEBASE_ERROR", $"Homebase answered HTTP {response.Status}");
+            : ApiError(502, "HOMEBASE_ERROR", response.ErrorCode is { } code
+                ? $"Homebase answered HTTP {response.Status} ({code})"
+                : $"Homebase answered HTTP {response.Status}");
 }
 
 /// <summary>

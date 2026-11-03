@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using EnteHomebaseProxy.Auth;
 using EnteHomebaseProxy.Odin;
 
 namespace EnteHomebaseProxy.Handlers;
@@ -28,6 +29,11 @@ public static class CollectionsHandlers
         app.MapGet("/collections/v2", GetV2);
         app.MapGet("/collections/v2/diff", GetDiffV2);
         app.MapPost("/collections/add-files", AddFiles);
+        app.MapPost("/collections/v3/remove-files", RemoveFiles);
+        app.MapPost("/collections/move-files", MoveFiles);
+        app.MapPost("/collections/rename", Rename);
+        app.MapPut("/collections/magic-metadata", UpdateSealed);
+        app.MapPut("/collections/public-magic-metadata", UpdateSealed);
 
         Todo.Map(app, "GET", "/collections",
             "Deprecated by /collections/v2, which is implemented.");
@@ -37,21 +43,7 @@ public static class CollectionsHandlers
         Todo.Map(app, "GET", "/collections/file",
             "Reads one file within a collection. Would be GET /api/v2/drives/{alias}/files/by-uid/{uid}/header " +
             "for the membership and the record: two calls.");
-        Todo.Map(app, "POST", "/collections/move-files",
-            "Moves photos between albums: per photo, create the new membership and soft-delete the old one.");
-        Todo.Map(app, "POST", "/collections/v3/remove-files",
-            "Removes photos from an album: one membership soft-delete per photo (the tombstone keeps the " +
-            "album, so the diff can report the removal).");
         Todo.Map(app, "POST", "/collections/suggest-delete", Why.OtherUsers);
-        Todo.Map(app, "POST", "/collections/rename",
-            "Would be PATCH /api/v2/drives/{alias}/files/by-uid/{uid} of the album with the new encrypted " +
-            "name; needs the current versionTag (a read first): two calls.");
-        Todo.Map(app, "PUT", "/collections/magic-metadata",
-            "Would be PATCH of the album by uid; Ente's version check needs the current versionTag (a read " +
-            "first): two calls.");
-        Todo.Map(app, "PUT", "/collections/public-magic-metadata",
-            "Would be PATCH of the album by uid; Ente's version check needs the current versionTag (a read " +
-            "first): two calls.");
     }
 
     /// <summary>
@@ -91,9 +83,6 @@ public static class CollectionsHandlers
         });
     }
 
-    /// <summary>Most photos one add-files call takes (the web app sends batches of 1000).</summary>
-    private const int MaxAddFiles = 1000;
-
     /// <summary>
     /// POST /collections/add-files, body {collectionID, files: [{id,
     /// encryptedKey, keyDecryptionNonce}]}: puts photos the owner already has
@@ -105,48 +94,104 @@ public static class CollectionsHandlers
     private static async Task<IResult> AddFiles(HttpContext context, OdinClient odin, CancellationToken ct)
     {
         if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
-
-        long collectionId;
-        var fileIds = new List<long>();
-        try
-        {
-            if (await JsonNode.ParseAsync(context.Request.Body, cancellationToken: ct) is not JsonObject body ||
-                EnteRecords.Long(body["collectionID"]) is not { } cid || cid is <= 0 or > EnteIds.MaxSafeInteger ||
-                body["files"] is not JsonArray files || files.Count is 0 or > MaxAddFiles)
-            {
-                return EnteResults.Status(400);
-            }
-
-            collectionId = cid;
-            foreach (var file in files)
-            {
-                if (file is not JsonObject item || EnteRecords.Long(item["id"]) is not { } id ||
-                    id is <= 0 or > EnteIds.MaxSafeInteger)
-                {
-                    return EnteResults.Status(400);
-                }
-
-                if (!fileIds.Contains(id)) fileIds.Add(id);
-            }
-        }
-        catch (JsonException)
+        if (await EnteRecords.BodyAsync(context, ct) is not { } body ||
+            EnteRecords.Id(body["collectionID"]) is not { } collectionId ||
+            EnteRecords.Ids(body["files"], EnteLibrary.MaxBatch) is not { } fileIds)
         {
             return EnteResults.Status(400);
         }
 
-        var album = await odin.GetHeaderByUniqueIdAsync(credentials, EnteDrive.Alias,
-            EnteIds.ToGuid(EnteIds.Kind.Collection, collectionId), ct);
-        if (album.Status == 404) return EnteResults.Status(404);
-        if (!album.IsSuccess) return EnteResults.OdinFailure(album);
+        var library = new EnteLibrary(odin, credentials, ct);
+        var (albumFailure, _) = await library.AlbumAsync(collectionId);
+        return albumFailure ?? await library.AddAsync(collectionId, fileIds) ?? Results.Ok();
+    }
 
-        foreach (var fileId in fileIds)
+    /// <summary>
+    /// POST /collections/v3/remove-files, body {collectionID, fileIDs}: takes
+    /// photos out of an album. The web app moves a photo that's in no other
+    /// album to Uncategorized first, as Ente has no orphans. Two calls: their
+    /// memberships, then a soft delete of them.
+    /// </summary>
+    private static async Task<IResult> RemoveFiles(HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (await EnteRecords.BodyAsync(context, ct) is not { } body ||
+            EnteRecords.Id(body["collectionID"]) is not { } collectionId ||
+            EnteRecords.Ids(body["fileIDs"], EnteLibrary.MaxBatch) is not { } fileIds)
         {
-            var response = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-                EnteRecords.Membership(collectionId, fileId), ct);
-            if (!response.IsSuccess && !response.IsExistingUniqueId) return EnteResults.OdinFailure(response);
+            return EnteResults.Status(400);
         }
 
-        return Results.Ok();
+        return await new EnteLibrary(odin, credentials, ct).RemoveAsync(collectionId, fileIds) ?? Results.Ok();
+    }
+
+    /// <summary>
+    /// POST /collections/move-files, body {fromCollectionID, toCollectionID,
+    /// files: [{id, …}]}: add-files to one album, then remove-files from the
+    /// other. One call for the album, one per photo, and two.
+    /// </summary>
+    private static async Task<IResult> MoveFiles(HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (await EnteRecords.BodyAsync(context, ct) is not { } body ||
+            EnteRecords.Id(body["fromCollectionID"]) is not { } from ||
+            EnteRecords.Id(body["toCollectionID"]) is not { } to || from == to ||
+            EnteRecords.Ids(body["files"], EnteLibrary.MaxBatch) is not { } fileIds)
+        {
+            return EnteResults.Status(400);
+        }
+
+        var library = new EnteLibrary(odin, credentials, ct);
+        var (albumFailure, _) = await library.AlbumAsync(to);
+        return albumFailure ?? await library.AddAsync(to, fileIds) ??
+            await library.RemoveAsync(from, fileIds) ?? Results.Ok();
+    }
+
+    /// <summary>
+    /// POST /collections/rename, body {collectionID, homebase}: the album's
+    /// details sealed again by the web app with the new name (Ente's
+    /// encryptedName has no meaning here). Two calls: see <see cref="Reseal"/>.
+    /// </summary>
+    private static async Task<IResult> Rename(HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (await EnteRecords.BodyAsync(context, ct) is not { } body ||
+            EnteRecords.Id(body["collectionID"]) is not { } collectionId ||
+            SealedRecord.Read(body["homebase"]) is not { } sealedRecord)
+        {
+            return EnteResults.Status(400);
+        }
+
+        return await Reseal(odin, credentials, collectionId, sealedRecord, ct);
+    }
+
+    /// <summary>
+    /// PUT /collections/magic-metadata and /collections/public-magic-metadata,
+    /// body {id, homebase}: the album's details sealed again by the web app
+    /// with the new settings. Two calls: see <see cref="Reseal"/>.
+    /// </summary>
+    private static async Task<IResult> UpdateSealed(HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (await EnteRecords.BodyAsync(context, ct) is not { } body ||
+            EnteRecords.Id(body["id"]) is not { } collectionId ||
+            SealedRecord.Read(body["homebase"]) is not { } sealedRecord)
+        {
+            return EnteResults.Status(400);
+        }
+
+        return await Reseal(odin, credentials, collectionId, sealedRecord, ct);
+    }
+
+    /// <summary>The album's file updated with a new sealed record: its header, then the update.</summary>
+    private static async Task<IResult> Reseal(OdinClient odin, HomebaseCredentials credentials, long collectionId,
+        SealedRecord sealedRecord, CancellationToken ct)
+    {
+        var (albumFailure, album) = await new EnteLibrary(odin, credentials, ct).AlbumAsync(collectionId);
+        if (albumFailure is not null) return albumFailure;
+        var response = await odin.UpdateSealedAsync(credentials, EnteDrive.Alias,
+            EnteIds.ToGuid(EnteIds.Kind.Collection, collectionId), album!, sealedRecord, ct);
+        return response.IsSuccess ? Results.Ok() : EnteResults.OdinFailure(response);
     }
 
     /// <summary>GET /collections/{id}: one album. One Odin call: its header by uniqueId.</summary>
@@ -168,7 +213,8 @@ public static class CollectionsHandlers
         return Results.Json(new
         {
             collection = EnteRecords.Collection(collectionID, sealedRecord, credentials,
-                OdinClient.UpdatedMicros(response.Body)),
+                OdinClient.UpdatedMicros(response.Body),
+                isDeleted: OdinClient.ArchivalStatus(response.Body) == EnteDrive.Removed),
         });
     }
 
@@ -196,7 +242,8 @@ public static class CollectionsHandlers
             if (EnteRecords.IdOf(header, EnteIds.Kind.Collection) is { } ids &&
                 SealedRecord.FromHeader(header) is { } sealedRecord)
             {
-                collections.Add(EnteRecords.Collection(ids.Id, sealedRecord, credentials, now));
+                collections.Add(EnteRecords.Collection(ids.Id, sealedRecord, credentials, now,
+                    isDeleted: OdinClient.ArchivalStatus(header) == EnteDrive.Removed));
             }
         }
 
@@ -206,7 +253,12 @@ public static class CollectionsHandlers
     /// <summary>
     /// GET /collections/v2/diff?collectionID&amp;sinceTime: the album's photos
     /// changed since sinceTime. Two Odin calls (decision 4): the album's
-    /// memberships, then the photos they point to.
+    /// memberships, tombstones included, then the photos they point to.
+    ///
+    /// A photo is in the diff when its membership changed or the photo itself
+    /// did (an edit to its details). One whose membership is a tombstone
+    /// (removed, moved, trashed), or whose photo is gone or in the trash, is
+    /// reported deleted.
     /// </summary>
     private static async Task<IResult> GetDiffV2(HttpContext context, OdinClient odin, CancellationToken ct)
     {
@@ -215,56 +267,52 @@ public static class CollectionsHandlers
         var sinceTime = EnteRecords.QueryLong(context, "sinceTime") ?? 0;
         if (collectionID is not { } cid || cid is <= 0 or > EnteIds.MaxSafeInteger) return EnteResults.Status(400);
 
-        var (membershipsResponse, membershipHeaders) = await odin.QueryBatchAsync(credentials, EnteDrive.Alias,
-            new JsonObject
-            {
-                ["fileType"] = new JsonArray(EnteDrive.MembershipFileType),
-                ["groupId"] = new JsonArray(EnteIds.ToGuid(EnteIds.Kind.Collection, cid).ToString("D")),
-            }, MaxRecords, ct);
-        if (!membershipsResponse.IsSuccess) return EnteResults.OdinFailure(membershipsResponse);
+        var library = new EnteLibrary(odin, credentials, ct);
+        var (membershipsFailure, memberships) = await library.MembershipsOfAlbumAsync(cid, includeDeleted: true);
+        if (membershipsFailure is not null) return membershipsFailure;
 
-        // A membership holds nothing but its uniqueId (album and photo).
-        var changed = new List<(long FileId, long Updated)>();
-        foreach (var header in membershipHeaders)
+        // Per photo, its latest membership: active, or the tombstone of one.
+        var latest = new Dictionary<long, (bool Active, long Updated)>();
+        foreach (var header in memberships)
         {
+            var active = !OdinClient.IsDeleted(header);
+            long? fileId = active
+                ? EnteRecords.IdOf(header, EnteIds.Kind.Membership) is { } ids && ids.Middle == cid ? ids.Id : null
+                : EnteRecords.GroupCollectionId(header) == cid ? EnteRecords.TaggedId(header, EnteIds.Kind.File) : null;
+            if (fileId is not { } id) continue;
             var updated = OdinClient.UpdatedMicros(header);
-            if (updated <= sinceTime - ClockSkewMicros) continue;
-            if (EnteRecords.IdOf(header, EnteIds.Kind.Membership) is { } ids && ids.Middle == cid)
+            if (!latest.TryGetValue(id, out var seen) || (active && !seen.Active) ||
+                (active == seen.Active && updated > seen.Updated))
             {
-                changed.Add((ids.Id, updated));
+                latest[id] = (active, updated);
             }
         }
 
-        var diff = new JsonArray();
-        if (changed.Count > 0)
+        var (photosFailure, photos) = await library.PhotosAsync([.. latest.Where(l => l.Value.Active).Select(l => l.Key)]);
+        if (photosFailure is not null) return photosFailure;
+
+        var since = sinceTime - ClockSkewMicros;
+        var changes = new List<(long Updated, JsonObject File)>();
+        foreach (var (fileId, (active, membershipUpdated)) in latest)
         {
-            var (recordsResponse, recordHeaders) = await odin.QueryBatchAsync(credentials, EnteDrive.Alias,
-                new JsonObject
-                {
-                    ["fileType"] = new JsonArray(EnteDrive.FileRecordFileType),
-                    ["clientUniqueIdAtLeastOne"] = new JsonArray([
-                        .. changed.Select(c =>
-                            JsonValue.Create(EnteIds.ToGuid(EnteIds.Kind.File, c.FileId).ToString("D"))),
-                    ]),
-                }, MaxRecords, ct);
-            if (!recordsResponse.IsSuccess) return EnteResults.OdinFailure(recordsResponse);
-
-            var photos = new Dictionary<long, JsonNode>();
-            foreach (var header in recordHeaders)
+            JsonObject? file = null;
+            var updated = membershipUpdated;
+            if (active && photos.TryGetValue(fileId, out var photo) &&
+                OdinClient.ArchivalStatus(photo) != EnteDrive.Removed)
             {
-                if (EnteRecords.IdOf(header, EnteIds.Kind.File) is { } ids) photos[ids.Id] = header;
+                updated = Math.Max(membershipUpdated, OdinClient.UpdatedMicros(photo));
+                if (updated > since) file = EnteRecords.File(fileId, cid, photo, credentials, updated);
+            }
+            else if (updated > since)
+            {
+                file = EnteRecords.DeletedFile(fileId, cid, credentials, updated);
             }
 
-            // Oldest first, as Ente's server returns diffs.
-            foreach (var (fileId, updated) in changed.OrderBy(c => c.Updated))
-            {
-                if (!photos.TryGetValue(fileId, out var header)) continue;
-                var file = EnteRecords.File(fileId, cid, header, credentials,
-                    Math.Max(updated, OdinClient.UpdatedMicros(header)));
-                if (file is not null) diff.Add(file);
-            }
+            if (file is not null) changes.Add((updated, file));
         }
 
+        // Oldest first, as Ente's server returns diffs.
+        var diff = new JsonArray([.. changes.OrderBy(c => c.Updated).Select(c => (JsonNode)c.File)]);
         return Results.Json(new JsonObject { ["diff"] = diff, ["hasMore"] = false });
     }
 }
