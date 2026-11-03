@@ -178,4 +178,23 @@ public sealed class LiveHomebase
         using var response = await http.SendAsync(request, ct);
         Assert.True(response.IsSuccessStatusCode, $"hard-delete-batch: HTTP {(int)response.StatusCode}");
     }
+
+    /// <summary>
+    /// Hard-deletes every file, tombstones included, tagged with one of these
+    /// (a test's own photo and album IDs, so only files the test made), for
+    /// cleaning up after a test. Memberships and trash entries carry them.
+    /// </summary>
+    public async Task HardDeleteTaggedAsync(IEnumerable<Guid> tags, CancellationToken ct)
+    {
+        using var http = new HttpClient();
+        var odin = new OdinClient(http);
+        var (response, headers) = await odin.QueryBatchAsync(Credentials, EnteDrive.Alias, new JsonObject
+        {
+            ["tagsMatchAtLeastOne"] = new JsonArray([.. tags.Select(t => JsonValue.Create(t.ToString("D")))]),
+        }, 1000, ct, includeDeleted: true);
+        Assert.True(response.IsSuccess, $"query before delete: HTTP {response.Status}");
+        if (headers.Count == 0) return;
+        var deleted = await odin.HardDeleteAsync(Credentials, EnteDrive.Alias, headers, ct);
+        Assert.True(deleted.IsSuccess, $"hard-delete-batch: HTTP {deleted.Status}");
+    }
 }

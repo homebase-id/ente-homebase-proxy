@@ -28,6 +28,9 @@ public static class EnteIds
 
         /// <summary>The key of one type of Ente "user entity" (people, locations); the number is from the type name.</summary>
         UserEntityKey = 0x05,
+
+        /// <summary>A photo in the trash: when, and from which album (its groupId).</summary>
+        Trash = 0x06,
     }
 
     /// <summary>A stable number for a name: the first 6 bytes of its SHA-256.</summary>

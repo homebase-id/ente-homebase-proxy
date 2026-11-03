@@ -40,6 +40,8 @@ public static class FilesHandlers
 
     public static void Map(IEndpointRouteBuilder app)
     {
+        app.MapPut("/files/magic-metadata", UpdateDetails);
+        app.MapPut("/files/public-magic-metadata", UpdateDetails);
         app.MapPost(UploadPath, Upload)
             .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxUploadBytes + (2 << 20)));
         app.MapGet(UploadPath + "/{fileID:long}/thumb", GetPhotoThumbnail);
@@ -92,12 +94,6 @@ public static class FilesHandlers
             "Finds files with the same hash across the library: needs a scan over every file (many calls).");
         Todo.Map(app, "PUT", "/files/thumbnail",
             "Would be PATCH /api/v2/drives/{alias}/files/{fileId} replacing the thumbnail payload. " + Why.IntIds);
-        Todo.Map(app, "PUT", "/files/magic-metadata",
-            "Would be PATCH /api/v2/drives/{alias}/files/{fileId}, but Ente's version check needs the current " +
-            "versionTag (a read first). " + Why.IntIds);
-        Todo.Map(app, "PUT", "/files/public-magic-metadata",
-            "Would be PATCH /api/v2/drives/{alias}/files/{fileId}, but Ente's version check needs the current " +
-            "versionTag (a read first). " + Why.IntIds);
         Todo.Map(app, "GET", "/files/count",
             "Public count of all files ever stored on Ente (marketing); there's nothing to ask Homebase.");
     }
@@ -184,12 +180,7 @@ public static class FilesHandlers
         if (!photoResponse.IsSuccess) return EnteResults.OdinFailure(photoResponse);
 
         var membershipResponse = await odin.CreateFileAsync(credentials, EnteDrive.Alias,
-            new NewOdinFile(EnteIds.MembershipGuid(upload.CollectionID, upload.FileID), EnteDrive.MembershipFileType,
-                null)
-            {
-                GroupId = collectionGuid,
-                Tags = [fileGuid, collectionGuid],
-            }, ct);
+            EnteRecords.Membership(upload.CollectionID, upload.FileID), ct);
         if (!membershipResponse.IsSuccess) return EnteResults.OdinFailure(membershipResponse);
 
         // The answer is what was stored, in the shape of Odin's header, as the diff will return it.
@@ -262,11 +253,8 @@ public static class FilesHandlers
         IReadOnlyList<(int Width, int Height, string ContentType)> Thumbnails,
         OdinPreviewThumbnail? PreviewThumbnail);
 
-    private static long? Long(JsonNode? node) =>
-        node?.GetValueKind() == JsonValueKind.Number && node.AsValue().TryGetValue<long>(out var n) ? n : null;
-
     private static int? Pixels(JsonNode? node) =>
-        Long(node) is { } n and > 0 and <= 16384 ? (int)n : null;
+        EnteRecords.Long(node) is { } n and > 0 and <= 16384 ? (int)n : null;
 
     private static string? Text(JsonNode? node, int maxLength) =>
         node?.GetValueKind() == JsonValueKind.String && node.GetValue<string>() is { Length: > 0 } text &&
@@ -282,11 +270,52 @@ public static class FilesHandlers
         return Convert.TryFromBase64String(text, buffer, out var n) && n == 16 ? buffer[..16] : null;
     }
 
+    /// <summary>
+    /// PUT /files/magic-metadata and /files/public-magic-metadata, body
+    /// {metadataList: [{id, homebase}]}: each photo's details sealed again by
+    /// the web app with the change (hidden, archived, a new date, caption or
+    /// location; Ente's encrypted magic metadata has no meaning here). One
+    /// call for the photos, then one update each. All are checked first, so a
+    /// bad or missing one changes nothing.
+    /// </summary>
+    private static async Task<IResult> UpdateDetails(HttpContext context, OdinClient odin, CancellationToken ct)
+    {
+        if (!EnteResults.TryGetCredentials(context, out var credentials, out var failure)) return failure!;
+        if (await EnteRecords.BodyAsync(context, ct) is not { } body ||
+            body["metadataList"] is not JsonArray list || list.Count is 0 or > EnteLibrary.MaxBatch)
+        {
+            return EnteResults.Status(400);
+        }
+
+        var updates = new Dictionary<long, SealedRecord>();
+        foreach (var item in list)
+        {
+            if (EnteRecords.Id(item?["id"]) is not { } id || SealedRecord.Read(item?["homebase"]) is not { } sealedRecord ||
+                !updates.TryAdd(id, sealedRecord))
+            {
+                return EnteResults.Status(400);
+            }
+        }
+
+        var (photosFailure, photos) = await new EnteLibrary(odin, credentials, ct).PhotosAsync(updates.Keys);
+        if (photosFailure is not null) return photosFailure;
+        if (updates.Keys.Any(id => !photos.ContainsKey(id))) return EnteResults.Status(404);
+
+        foreach (var (id, sealedRecord) in updates)
+        {
+            var response = await odin.UpdateSealedAsync(credentials, EnteDrive.Alias,
+                EnteIds.ToGuid(EnteIds.Kind.File, id), photos[id], sealedRecord, ct);
+            if (!response.IsSuccess) return EnteResults.OdinFailure(response);
+        }
+
+        return Results.Ok();
+    }
+
     /// <summary>The request part, checked; null if anything is missing or out of range.</summary>
     private static UploadRequest? ReadUpload(JsonObject body)
     {
-        if (Long(body["fileID"]) is not { } fileID || fileID is <= 0 or > EnteIds.MaxSafeInteger) return null;
-        if (Long(body["collectionID"]) is not { } collectionID || collectionID is <= 0 or > EnteIds.MaxSafeInteger)
+        if (EnteRecords.Long(body["fileID"]) is not { } fileID || fileID is <= 0 or > EnteIds.MaxSafeInteger) return null;
+        if (EnteRecords.Long(body["collectionID"]) is not { } collectionID || collectionID is <= 0 or > EnteIds.MaxSafeInteger)
         {
             return null;
         }
